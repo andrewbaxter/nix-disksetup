@@ -1,0 +1,32 @@
+[package]
+name = "volumesetup"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+smartcard = [
+    "dep:card-backend",
+    "dep:card-backend-pcsc",
+    "dep:pcsc",
+    "dep:pgp",
+    "dep:openpgp-card-rpgp",
+]
+default = ["smartcard"]
+
+[dependencies]
+aargvark = "0.3"
+flowcontrol = { version = "0.2" }
+loga = "0.5"
+rustix = { version = "0.38", features = ["fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Feature nfc
+pcsc = { version = "2.8.2", optional = true }
+pgp = { version = "0.13.1", optional = true }
+openpgp-card-rpgp = { version = "0.1.1", optional = true }
+card-backend = { version = "0.2.0", optional = true }
+card-backend-pcsc = { version = "0.5.0", optional = true }
+rand = "0.8.5"
+openpgp-card = "0.5.0"
+bstr = "1.9.1"
