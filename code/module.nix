@@ -5,11 +5,14 @@
       enable = mkOption {
         type = types.bool;
         default = false;
-        description = "Enable the volumesetup service to run at boot.";
+        description = "Enable the volumesetup service to run at boot. See volumesetup documentation for default values for various parameters.";
+      };
+      uuid = mkOption {
+        type = types.str;
+        description = "Override the default UUID.";
       };
       mountpoint = mkOption {
         type = types.str;
-        default = "/mnt/persistent";
         description = "Where to mount the volume";
       };
       encryption = mkOption {
@@ -50,12 +53,13 @@
               cmdline = lib.concatStringsSep " "
                 (
                   [ "${pkg}/bin/volumesetup" ] ++
+                  (lib.option cfg.uuid [ "--uuid ${cfg.uuid}" ]) ++
                   {
                     "none" = [ ];
                     "password" = [ "--encryption password" ];
                     "smartcard" = [ "--encryption smartcard ${cfg.encryptionSmartcardKeyfile} ${cfg.encryptionSmartcardPinMode}" ];
                   }.${cfg.encryption} ++
-                  [ "--mountpoint ${cfg.mountpoint}" ] ++
+                  (lib.option cfg.mountpoint [ "--mountpoint ${cfg.mountpoint}" ]) ++
                   (lib.option ((builtins.length cfg.ensureDirs) > 0) [ "--ensure-dirs" ] ++ cfg.ensureDirs) ++
                   [ ]
                 );

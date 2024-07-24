@@ -10,9 +10,9 @@
     pname = "volumesetup";
     version = "0.0.0";
     cargoLock = {
-      lockFile = ./rust/Cargo.lock;
+      lockFile = ./Cargo.lock;
     };
-    src = ./rust;
+    src = ./.;
     buildFeatures = [
       "smartcard"
     ];
@@ -30,6 +30,9 @@
       let
         path = lib.makeBinPath [
           pkgs.systemd
+          pkgs.e2fsprogs
+          pkgs.cryptsetup
+          pkgs.util-linux
         ];
       in
       ''

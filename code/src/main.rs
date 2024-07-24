@@ -120,6 +120,8 @@ impl Default for EncryptionMode {
 
 #[derive(Aargvark)]
 struct Args {
+    /// Override the default UUID.
+    uuid: Option<String>,
     /// The encryption key, if the volume should be encrypted. Otherwise unencrypted.
     encrypted: Option<EncryptionMode>,
     /// The mount point of the volume.  Defaults to `/mnt/persistent`.
@@ -625,6 +627,7 @@ fn defer<F: FnOnce() -> ()>(f: F) -> Deferred<F> {
 fn volume_setup() -> Result<(), loga::Error> {
     let args = vark::<Args>();
     let log = Log::new_root(loga::INFO);
+    let outer_uuid = args.uuid.unwrap_or_else(|| OUTER_UUID.to_string());
     let mount_path =
         path::absolute(
             args.mountpoint.clone().unwrap_or_else(|| PathBuf::from("/mnt/persistent")),
@@ -722,7 +725,7 @@ fn volume_setup() -> Result<(), loga::Error> {
         Command::new("cryptsetup")
             .arg("open")
             .arg("--key-file=-")
-            .arg(format!("/dev/disk/by-uuid/{}", OUTER_UUID))
+            .arg(format!("/dev/disk/by-uuid/{}", &outer_uuid))
             .arg(mapper_name)
             .simple()
             .run_stdin(key.as_bytes())
@@ -754,7 +757,7 @@ fn volume_setup() -> Result<(), loga::Error> {
 
             // Does the setup volume already exist?
             let uuid = candidate.uuid.as_ref().map(|u| u.as_str());
-            if uuid == Some(&OUTER_UUID) {
+            if uuid == Some(&outer_uuid) {
                 log.log_with(loga::INFO, "Found `rw` disk", ea!(disk = candidate.path));
                 break 'exists candidate;
             }
@@ -780,7 +783,7 @@ fn volume_setup() -> Result<(), loga::Error> {
             log.log_with(
                 loga::INFO,
                 "UUID mismatch, remembering as candidate disk",
-                ea!(disk = candidate.path, found = uuid.dbg_str(), want = OUTER_UUID),
+                ea!(disk = candidate.path, found = uuid.dbg_str(), want = outer_uuid),
             );
             shed!{
                 let Some(best) = &best_candidate else {
@@ -812,7 +815,7 @@ fn volume_setup() -> Result<(), loga::Error> {
             Command::new("cryptsetup")
                 .arg("luksUUID")
                 .arg("--uuid")
-                .arg(OUTER_UUID)
+                .arg(&outer_uuid)
                 .arg(&candidate.path)
                 .simple()
                 .run()
@@ -821,8 +824,8 @@ fn volume_setup() -> Result<(), loga::Error> {
             format(&luks_dev_path, INNER_UUID)?;
             ensure_mounted(INNER_UUID)?;
         } else {
-            format(&candidate.path, OUTER_UUID)?;
-            ensure_mounted(OUTER_UUID)?;
+            format(&candidate.path, &outer_uuid)?;
+            ensure_mounted(&outer_uuid)?;
         }
     } 'exists {
         // Found existing volume, just mount it
@@ -830,7 +833,7 @@ fn volume_setup() -> Result<(), loga::Error> {
             ensure_map_luks(&key)?;
             ensure_mounted(INNER_UUID)?;
         } else {
-            ensure_mounted(OUTER_UUID)?;
+            ensure_mounted(&outer_uuid)?;
         }
     });
 
