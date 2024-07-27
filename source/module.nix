@@ -2,34 +2,36 @@
 {
   options = {
     volumesetup = {
-      enable = mkOption {
-        type = types.bool;
+      enable = lib.mkOption {
+        type = lib.types.bool;
         default = false;
         description = "Enable the volumesetup service to run at boot. See volumesetup documentation for default values for various parameters.";
       };
-      uuid = mkOption {
-        type = types.str;
+      uuid = lib.mkOption {
+        type = lib.types.str;
+        default = "";
         description = "Override the default UUID.";
       };
-      mountpoint = mkOption {
-        type = types.str;
+      mountpoint = lib.mkOption {
+        type = lib.types.str;
+        default = "";
         description = "Where to mount the volume";
       };
-      encryption = mkOption {
-        type = types.enum [ "none" "password" "smartcard" ];
+      encryption = lib.mkOption {
+        type = lib.types.enum [ "none" "password" "smartcard" ];
         default = "none";
         description = "Encrypt the disk, and where to obtain the key. See the other `encryption` options for per-mode options.";
       };
-      encryptionSmartcardKeyfile = mkOption {
-        type = types.str;
+      encryptionSmartcardKeyfile = lib.mkOption {
+        type = lib.types.str;
         description = "Path to encrypted key file";
       };
-      encryptionSmartcardPinMode = mkOption {
-        types = types.enum [ "factory-default" "text" "numpad" ];
+      encryptionSmartcardPinMode = lib.mkOption {
+        type = lib.types.enum [ "factory-default" "text" "numpad" ];
         description = "How to get the PIN for the smartcard.";
       };
-      ensureDirs = mkOption {
-        type = with types; listOf str;
+      ensureDirs = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
         default = [ ];
         description = "A list of paths of directories to create. These may be absolute or relative to the mountpoint.";
       };
@@ -49,18 +51,18 @@
           serviceConfig.RestartSec = 60;
           script =
             let
-              pkg = import ./volumesetup.nix;
+              pkg = (import ./package.nix) { pkgs = pkgs; };
               cmdline = lib.concatStringsSep " "
                 (
                   [ "${pkg}/bin/volumesetup" ] ++
-                  (lib.option cfg.uuid [ "--uuid ${cfg.uuid}" ]) ++
+                  (lib.lists.optionals (cfg.uuid != "") [ "--uuid ${cfg.uuid}" ]) ++
                   {
                     "none" = [ ];
                     "password" = [ "--encryption password" ];
                     "smartcard" = [ "--encryption smartcard ${cfg.encryptionSmartcardKeyfile} ${cfg.encryptionSmartcardPinMode}" ];
                   }.${cfg.encryption} ++
-                  (lib.option cfg.mountpoint [ "--mountpoint ${cfg.mountpoint}" ]) ++
-                  (lib.option ((builtins.length cfg.ensureDirs) > 0) [ "--ensure-dirs" ] ++ cfg.ensureDirs) ++
+                  (lib.lists.optionals (cfg.mountpoint != "") [ "--mountpoint ${cfg.mountpoint}" ]) ++
+                  (lib.lists.optionals (cfg.ensureDirs != [ ]) [ "--ensure-dirs" ] ++ cfg.ensureDirs) ++
                   [ ]
                 );
             in

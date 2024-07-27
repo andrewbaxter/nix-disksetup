@@ -102,7 +102,7 @@ You can also do it as part of your system build, if you're building a disk image
 
 ```nix
 {
-    modules = [ ./path/to/volumesetup/default.nix ];
+    imports = [ ./path/to/volumesetup/source/module.nix ];
     config = {
         volumesetup.enable = true;
         volumesetup.encryption = "smartcard";

@@ -4,6 +4,8 @@
    , pkg-config
    , rustc
    , cargo
+   , nettle
+   , pcsclite
    , makeWrapper
    }:
   rustPlatform.buildRustPackage rec {
@@ -25,6 +27,7 @@
       cargo
       rustc
       rustPlatform.bindgenHook
+      makeWrapper
     ];
     postFixup =
       let

@@ -18,6 +18,7 @@ use {
         ResultContext,
     },
     openpgp_card_rpgp::CardSlot,
+    path_absolutize::Absolutize,
     pcsc::Context,
     pgp::Deserializable,
     rand::{
@@ -58,7 +59,6 @@ use {
         io::Write,
         os::unix::ffi::OsStrExt,
         path::{
-            self,
             PathBuf,
         },
         process::{
@@ -629,9 +629,13 @@ fn volume_setup() -> Result<(), loga::Error> {
     let log = Log::new_root(loga::INFO);
     let outer_uuid = args.uuid.unwrap_or_else(|| OUTER_UUID.to_string());
     let mount_path =
-        path::absolute(
-            args.mountpoint.clone().unwrap_or_else(|| PathBuf::from("/mnt/persistent")),
-        ).context("Couldn't make mountpoint absolute")?;
+        args
+            .mountpoint
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("/mnt/persistent"))
+            .absolutize()
+            .context("Couldn't make mountpoint absolute")?
+            .into_owned();
 
     // Mounting - helper methods
     let format = |dev_path: &str, uuid: &str| -> Result<(), loga::Error> {
@@ -840,7 +844,7 @@ fn volume_setup() -> Result<(), loga::Error> {
     // Ensure subdirectories in mountpoint
     for path in args.create_dirs.unwrap_or_default() {
         create_dir_all(
-            &mount_path.join(path),
+            &mount_path.join(&path),
         ).stack_context_with(&log, "Failed to create mount point subidr", ea!(subdir = path.to_string_lossy()))?;
     }
 
