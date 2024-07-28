@@ -14,7 +14,7 @@
       };
       mountpoint = lib.mkOption {
         type = lib.types.str;
-        default = "";
+        default = "/mnt/persistent";
         description = "Where to mount the volume";
       };
       encryption = lib.mkOption {
@@ -45,7 +45,7 @@
       systemd.services = lib.mkIf cfg.enable {
         volumesetup = {
           wantedBy = [ "multi-user.target" ];
-          serviceConfig.Type = "simple";
+          serviceConfig.Type = "oneshot";
           startLimitIntervalSec = 0;
           serviceConfig.Restart = "on-failure";
           serviceConfig.RestartSec = 60;
@@ -61,7 +61,7 @@
                     "password" = [ "--encryption password" ];
                     "smartcard" = [ "--encryption smartcard ${cfg.encryptionSmartcardKeyfile} ${cfg.encryptionSmartcardPinMode}" ];
                   }.${cfg.encryption} ++
-                  (lib.lists.optionals (cfg.mountpoint != "") [ "--mountpoint ${cfg.mountpoint}" ]) ++
+                  [ "--mountpoint ${cfg.mountpoint}" ] ++
                   (lib.lists.optionals (cfg.ensureDirs != [ ]) [ "--ensure-dirs" ] ++ cfg.ensureDirs) ++
                   [ ]
                 );

@@ -13,7 +13,6 @@ use {
         ea,
         fatal,
         DebugDisplay,
-        ErrContext,
         Log,
         ResultContext,
     },
@@ -24,21 +23,6 @@ use {
     rand::{
         prelude::SliceRandom,
         thread_rng,
-    },
-    rustix::{
-        fs::{
-            mkdirat,
-            open,
-            renameat,
-            unlinkat,
-            AtFlags,
-            Mode,
-            MountFlags,
-            OFlags,
-            UnmountFlags,
-        },
-        io::Errno,
-        path::Arg,
     },
     serde::{
         de::DeserializeOwned,
@@ -58,9 +42,7 @@ use {
         },
         io::Write,
         os::unix::ffi::OsStrExt,
-        path::{
-            PathBuf,
-        },
+        path::PathBuf,
         process::{
             Command,
             Stdio,
@@ -149,6 +131,8 @@ struct SimpleCommand<'a>(&'a mut Command);
 impl<'a> SimpleCommand<'a> {
     fn run(&mut self) -> Result<(), loga::Error> {
         let log = Log::new().fork(ea!(command = self.0.dbg_str()));
+        self.0.stdout(std::process::Stdio::piped());
+        self.0.stderr(std::process::Stdio::piped());
         let o = self.0.output().stack_context(&log, "Failed to start child process")?;
         if !o.status.success() {
             return Err(
@@ -163,6 +147,8 @@ impl<'a> SimpleCommand<'a> {
 
     fn run_stdin(&mut self, data: &[u8]) -> Result<(), loga::Error> {
         let log = Log::new().fork(ea!(command = self.0.dbg_str()));
+        self.0.stdout(std::process::Stdio::piped());
+        self.0.stderr(std::process::Stdio::piped());
         let mut child = self.0.stdin(Stdio::piped()).spawn().stack_context(&log, "Failed to start child process")?;
         let stdin = child.stdin.as_mut().unwrap();
         stdin.write_all(data).stack_context(&log, "Error writing to child process stdin")?;
@@ -180,7 +166,9 @@ impl<'a> SimpleCommand<'a> {
 
     fn run_stdout(&mut self) -> Result<Vec<u8>, loga::Error> {
         let log = Log::new().fork(ea!(command = self.0.dbg_str()));
-        let child = self.0.stdout(Stdio::piped()).spawn().stack_context(&log, "Failed to start child process")?;
+        self.0.stdout(std::process::Stdio::piped());
+        self.0.stderr(std::process::Stdio::piped());
+        let child = self.0.spawn().stack_context(&log, "Failed to start child process")?;
         let output = child.wait_with_output().stack_context(&log, "Failed to wait for child process to exit")?;
         if !output.status.success() {
             return Err(
@@ -194,25 +182,12 @@ impl<'a> SimpleCommand<'a> {
     }
 
     fn run_json_out<D: DeserializeOwned>(&mut self) -> Result<D, loga::Error> {
+        let res = self.run_stdout()?;
         let log = Log::new().fork(ea!(command = self.0.dbg_str()));
-        let child = self.0.stdout(Stdio::piped()).spawn().stack_context(&log, "Failed to start child process")?;
-        let output = child.wait_with_output().stack_context(&log, "Failed to wait for child process to exit")?;
-        if !output.status.success() {
-            return Err(
-                log.err_with(
-                    "Child process exited with error",
-                    ea!(code = output.status.code().dbg_str(), output = output.dbg_str()),
-                ),
-            );
-        }
         return Ok(
             serde_json::from_slice(
-                &output.stdout,
-            ).stack_context_with(
-                &log,
-                "Error parsing output as json",
-                ea!(code = output.status.code().dbg_str(), output = output.dbg_str()),
-            )?,
+                &res,
+            ).stack_context_with(&log, "Error parsing output as json", ea!(output = res.dbg_str()))?,
         );
     }
 }
@@ -604,26 +579,6 @@ struct LsblkDevice {
     children: Vec<LsblkDevice>,
 }
 
-struct Deferred<T: FnOnce() -> ()>(Option<T>);
-
-impl<T: FnOnce() -> ()> Deferred<T> {
-    fn cancel(mut self) {
-        self.0 = None;
-    }
-}
-
-impl<T: FnOnce() -> ()> Drop for Deferred<T> {
-    fn drop(&mut self) {
-        if let Some(f) = self.0.take() {
-            f();
-        }
-    }
-}
-
-fn defer<F: FnOnce() -> ()>(f: F) -> Deferred<F> {
-    return Deferred(Some(f));
-}
-
 fn volume_setup() -> Result<(), loga::Error> {
     let args = vark::<Args>();
     let log = Log::new_root(loga::INFO);
@@ -651,77 +606,56 @@ fn volume_setup() -> Result<(), loga::Error> {
     };
     let ensure_mounted = |uuid: &str| {
         ta_return!((), loga::Error);
-
-        // Atomic, idempotent(ish)
-        let log = log.fork(ea!(mountpoint = mount_path.to_string_lossy()));
-        let parent_path = mount_path.parent().stack_context(&log, "Mountpoint too extreme - no parent directory")?;
-        let mount_relpath = mount_path.file_name().stack_context(&log, "Invalid mountpoint, no filename")?;
-        let parent_fd = open(parent_path, OFlags::PATH, Mode::empty()).context("Error opening parent dir fd")?;
-        let premount_relpath = shed!{
-            'found _;
-            for i in 0.. {
-                let premount_relpath = format!(".mount_{}", i);
-                match mkdirat(&parent_fd, &premount_relpath, Mode::from(0o755)) {
-                    Ok(_) => {
-                        break 'found premount_relpath;
-                    },
-                    Err(Errno::EXIST) => { },
-                    Err(e) => {
-                        return Err(
-                            e.stack_context_with(
-                                &log,
-                                "Error creating premount directory",
-                                ea!(premount_relpath = premount_relpath.to_string_lossy()),
-                            ),
-                        );
-                    },
-                }
-            }
-            return Err(log.err("Exhausted all numeric suffixes trying to create a unique premount path"));
-        };
-        let cleanup_premount = defer(|| {
-            unlinkat(
-                &parent_fd,
-                &premount_relpath,
-                AtFlags::empty(),
-            ).log(&log, loga::WARN, "Failed to clean up premount dir");
-        });
-        let premount_path = parent_path.join(&premount_relpath);
-        rustix::fs::mount(
-            &format!("/dev/disk/by-uuid/{}", uuid),
-            &premount_path,
-            "ext4",
-            MountFlags::NOATIME,
-            "",
-        ).context_with("Failed to mount to premount dir", ea!(premount_path = premount_path.to_string_lossy()))?;
-        let cleanup_mount = defer(|| {
-            rustix::fs::unmount(
-                &parent_path.join(&premount_relpath),
-                UnmountFlags::DETACH,
-            ).log_with(
-                &log,
-                loga::WARN,
-                "Failed to lazily unmount premount",
-                ea!(premount_path = premount_path.to_string_lossy()),
+        let fs_dev_path = PathBuf::from(format!("/dev/disk/by-uuid/{}", uuid));
+        let systemd_mount_name =
+            from_utf8(
+                Command::new("systemd-escape")
+                    .arg("--path")
+                    .arg("--suffix=mount")
+                    .arg(&mount_path)
+                    .simple()
+                    .run_stdout()
+                    .context("Error determining systemd mount name")?,
+            ).context("Systemd mount name via systemd-escape is not valid utf-8")?;
+        let raw_active_state =
+            from_utf8(
+                Command::new("systemctl")
+                    .arg("show")
+                    .arg("--property=ActiveState")
+                    .arg(&systemd_mount_name)
+                    .simple()
+                    .run_stdout()
+                    .context("Error checking mount unit active state")?,
+            ).context("Mount unit active state isn't valid utf-8")?;
+        let Some((key, value)) = raw_active_state.trim().split_once("=") else {
+            return Err(
+                loga::err_with(
+                    "Unable to parse mount unit active state",
+                    ea!(unit = systemd_mount_name, raw_active_state = raw_active_state),
+                ),
             );
-        });
-        match renameat(&parent_fd, &premount_relpath, &parent_fd, mount_relpath) {
-            Ok(_) => {
-                // Freshly mounted, keep dirs
-                cleanup_mount.cancel();
-                cleanup_premount.cancel();
-            },
-            Err(Errno::EXIST) => {
-                // Was already mounted, undo everything (auto: drop)
-            },
-            Err(e) => {
-                return Err(e.context("Error moving premount into mount point"));
-            },
+        };
+        if key != "ActiveState" {
+            return Err(
+                loga::err_with(
+                    "Active state output has unexpected KV data",
+                    ea!(unit = systemd_mount_name, raw_active_state = raw_active_state),
+                ),
+            );
+        }
+        if value != "active" {
+            Command::new("systemd-mount")
+                .arg("--options=noatime")
+                .arg(fs_dev_path)
+                .arg(&mount_path)
+                .simple()
+                .run()
+                .context("Failed to mount persistent disk")?;
         }
         return Ok(());
     };
     let ensure_map_luks = |key: &str| -> Result<String, loga::Error> {
-        let mapper_name = "rw";
+        let mapper_name = "persistent";
         let mapper_dev_path = format!("/dev/mapper/{}", mapper_name);
         if PathBuf::from(&mapper_dev_path).exists() {
             return Ok(mapper_dev_path);
@@ -762,7 +696,7 @@ fn volume_setup() -> Result<(), loga::Error> {
             // Does the setup volume already exist?
             let uuid = candidate.uuid.as_ref().map(|u| u.as_str());
             if uuid == Some(&outer_uuid) {
-                log.log_with(loga::INFO, "Found `rw` disk", ea!(disk = candidate.path));
+                log.log_with(loga::INFO, "Found persistent disk", ea!(disk = candidate.path));
                 break 'exists candidate;
             }
 
@@ -790,21 +724,20 @@ fn volume_setup() -> Result<(), loga::Error> {
                 ea!(disk = candidate.path, found = uuid.dbg_str(), want = outer_uuid),
             );
             shed!{
-                let Some(best) = &best_candidate else {
-                    break;
+                if let Some(best) = &best_candidate {
+                    if best.size >= candidate.size {
+                        break;
+                    }
                 };
-                if best.size >= candidate.size {
-                    break;
-                }
                 best_candidate = Some(candidate);
             }
         }
 
         // Didn't find existing volume, so format the best candidate volume
-        let candidate = best_candidate.context("Couldn't find `rw` disk or a suitable candidate for formatting")?;
+        let candidate = best_candidate.context("Couldn't find persistent disk or a suitable candidate for formatting")?;
         log.log_with(
             loga::INFO,
-            "Couldn't find `rw` disk, formatting best attached candidate disk as rw",
+            "Couldn't find persistent disk, formatting best attached candidate disk",
             ea!(disk = candidate.path),
         );
         if let Some(key) = get_key(&log, &args.encrypted.unwrap_or_default(), true)? {

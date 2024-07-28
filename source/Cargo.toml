@@ -17,7 +17,6 @@ default = ["smartcard"]
 aargvark = "0.3"
 flowcontrol = { version = "0.2" }
 loga = "0.5"
-rustix = { version = "0.38", features = ["fs"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
