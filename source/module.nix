@@ -46,6 +46,7 @@
         volumesetup = {
           wantedBy = [ "multi-user.target" ];
           serviceConfig.Type = "oneshot";
+          serviceConfig.RemainAfterExit = "yes";
           startLimitIntervalSec = 0;
           serviceConfig.Restart = "on-failure";
           serviceConfig.RestartSec = 60;

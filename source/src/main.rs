@@ -42,7 +42,10 @@ use {
         },
         io::Write,
         os::unix::ffi::OsStrExt,
-        path::PathBuf,
+        path::{
+            Path,
+            PathBuf,
+        },
         process::{
             Command,
             Stdio,
@@ -593,7 +596,7 @@ fn volume_setup() -> Result<(), loga::Error> {
             .into_owned();
 
     // Mounting - helper methods
-    let format = |dev_path: &str, uuid: &str| -> Result<(), loga::Error> {
+    let format = |dev_path: &Path, uuid: &str| -> Result<PathBuf, loga::Error> {
         Command::new("mkfs.ext4")
             .arg("-F")
             .arg(dev_path)
@@ -602,11 +605,22 @@ fn volume_setup() -> Result<(), loga::Error> {
             .simple()
             .run()
             .context("Error formatting persistent volume")?;
-        return Ok(());
-    };
-    let ensure_mounted = |uuid: &str| {
-        ta_return!((), loga::Error);
         let fs_dev_path = PathBuf::from(format!("/dev/disk/by-uuid/{}", uuid));
+        for _ in 0 .. 30 {
+            if fs_dev_path.exists() {
+                return Ok(fs_dev_path);
+            }
+            sleep(Duration::from_secs(1));
+        }
+        return Err(
+            loga::err_with(
+                "Even after formatting disk ext4, it never appeared in `by-uuid`. Try wiping the disk to remove misleading headers or doing a health check.",
+                ea!(dev = dev_path.to_string_lossy(), path = fs_dev_path.to_string_lossy()),
+            ),
+        );
+    };
+    let ensure_mounted = |fs_dev_path: &Path| {
+        ta_return!((), loga::Error);
         let systemd_mount_name =
             from_utf8(
                 Command::new("systemd-escape")
@@ -654,10 +668,10 @@ fn volume_setup() -> Result<(), loga::Error> {
         }
         return Ok(());
     };
-    let ensure_map_luks = |key: &str| -> Result<String, loga::Error> {
+    let ensure_map_luks = |key: &str| -> Result<PathBuf, loga::Error> {
         let mapper_name = "persistent";
-        let mapper_dev_path = format!("/dev/mapper/{}", mapper_name);
-        if PathBuf::from(&mapper_dev_path).exists() {
+        let mapper_dev_path = PathBuf::from(format!("/dev/mapper/{}", mapper_name));
+        if mapper_dev_path.exists() {
             return Ok(mapper_dev_path);
         }
         Command::new("cryptsetup")
@@ -758,19 +772,20 @@ fn volume_setup() -> Result<(), loga::Error> {
                 .run()
                 .context("Error setting UUID on newly encrypted volume on persistent disk")?;
             let luks_dev_path = ensure_map_luks(&key).context("Error mapping new luks volume")?;
-            format(&luks_dev_path, INNER_UUID)?;
-            ensure_mounted(INNER_UUID)?;
+            let fs_dev_path = format(&luks_dev_path, INNER_UUID)?;
+            ensure_mounted(&fs_dev_path)?;
         } else {
-            format(&candidate.path, &outer_uuid)?;
-            ensure_mounted(&outer_uuid)?;
+            let fs_dev_path = format(&PathBuf::from(&candidate.path), &outer_uuid)?;
+            ensure_mounted(&fs_dev_path)?;
         }
-    } 'exists {
+    } candidate = 'exists {
         // Found existing volume, just mount it
         if let Some(key) = get_key(&log, &args.encrypted.unwrap_or_default(), false)? {
-            ensure_map_luks(&key)?;
-            ensure_mounted(INNER_UUID)?;
+            let fs_dev_path = ensure_map_luks(&key)?;
+            ensure_mounted(&fs_dev_path)?;
         } else {
-            ensure_mounted(&outer_uuid)?;
+            let fs_dev_path = PathBuf::from(&candidate.path);
+            ensure_mounted(&fs_dev_path)?;
         }
     });
 
