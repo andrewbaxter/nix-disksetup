@@ -7,6 +7,11 @@
         default = false;
         description = "Enable the volumesetup service to run at boot. See volumesetup documentation for default values for various parameters.";
       };
+      debug = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = "Enable debug logging.";
+      };
       uuid = lib.mkOption {
         type = lib.types.str;
         default = "";
@@ -56,6 +61,7 @@
               cmdline = lib.concatStringsSep " "
                 (
                   [ "${pkg}/bin/volumesetup" ] ++
+                  (lib.lists.optionals cfg.debug [ "--debug" ]) ++
                   (lib.lists.optionals (cfg.uuid != "") [ "--uuid ${cfg.uuid}" ]) ++
                   {
                     "none" = [ ];

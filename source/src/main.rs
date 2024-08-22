@@ -36,12 +36,8 @@ use {
         fs::{
             create_dir_all,
             read,
-            read_dir,
-            File,
-            OpenOptions,
         },
         io::Write,
-        os::unix::ffi::OsStrExt,
         path::{
             Path,
             PathBuf,
@@ -105,10 +101,11 @@ impl Default for EncryptionMode {
 
 #[derive(Aargvark)]
 struct Args {
+    debug: Option<()>,
     /// Override the default UUID.
     uuid: Option<String>,
     /// The encryption key, if the volume should be encrypted. Otherwise unencrypted.
-    encrypted: Option<EncryptionMode>,
+    encryption: Option<EncryptionMode>,
     /// The mount point of the volume.  Defaults to `/mnt/persistent`.
     mountpoint: Option<PathBuf>,
     /// Ensure these directories (and parents) relative to the mountdir once it's
@@ -193,64 +190,6 @@ impl<'a> SimpleCommand<'a> {
             ).stack_context_with(&log, "Error parsing output as json", ea!(output = res.dbg_str()))?,
         );
     }
-}
-
-fn wall(log: &Log, message: &str) {
-    let message = format!("{}\n", message);
-    match (|| -> Result<(), loga::Error> {
-        for dev in read_dir("/dev/pts").context("Error listing pts")? {
-            let mut path = "".to_string();
-            match (|| -> Result<(), loga::Error> {
-                let dev = dev?;
-                path = dev.path().to_string_lossy().to_string();
-                if dev.file_name().as_os_str().as_bytes() == b"ptmx" {
-                    return Ok(());
-                }
-                OpenOptions::new().write(true).open(&dev.path())?.write_all(message.as_bytes())?;
-                return Ok(());
-            })() {
-                Ok(_) => (),
-                Err(e) => {
-                    log.log_err(loga::DEBUG, e.context_with("Error writing to pt, skipping", ea!(path = path)));
-                    continue;
-                },
-            }
-        }
-        return Ok(());
-    })() {
-        Ok(_) => { },
-        Err(e) => {
-            log.log_err(loga::DEBUG, e.context_with("Error listing pts, not writing", ea!(message = message)));
-        },
-    };
-    match (|| -> Result<(), loga::Error> {
-        for dev in read_dir("/dev").context("Error listing ttys")? {
-            let mut path = "".to_string();
-            match (|| -> Result<(), loga::Error> {
-                let dev = dev?;
-                path = dev.path().to_string_lossy().to_string();
-                let name_bytes = dev.file_name();
-                let name_bytes = name_bytes.as_os_str().as_bytes();
-                if !name_bytes.starts_with(b"tty") || name_bytes == b"tty" {
-                    return Ok(());
-                }
-                File::open(&dev.path())?.write_all(message.as_bytes())?;
-                return Ok(());
-            })() {
-                Ok(_) => (),
-                Err(e) => {
-                    log.log_err(loga::DEBUG, e.context_with("Error writing to tty, skipping", ea!(path = path)));
-                    continue;
-                },
-            }
-        }
-        return Ok(());
-    })() {
-        Ok(_) => { },
-        Err(e) => {
-            log.log_err(loga::DEBUG, e.context_with("Error listing ttys, not writing", ea!(message = message)));
-        },
-    };
 }
 
 fn get_key(log: &Log, encrypted: &EncryptionMode, confirm: bool) -> Result<Option<String>, loga::Error> {
@@ -379,7 +318,7 @@ fn get_key(log: &Log, encrypted: &EncryptionMode, confirm: bool) -> Result<Optio
                     for new in reader_names {
                         watch.push(pcsc::ReaderState::new(new, pcsc::State::UNKNOWN));
                     }
-                    wall(log, "Please hold your smartcard to the reader");
+                    log.log(loga::INFO, "Please hold your smartcard to the reader");
                     match pcsc_context.get_status_change(Duration::from_secs(10), &mut watch) {
                         Ok(_) => { },
                         Err(pcsc::Error::Timeout) => {
@@ -435,7 +374,7 @@ fn get_key(log: &Log, encrypted: &EncryptionMode, confirm: bool) -> Result<Optio
                                                 );
                                             },
                                         };
-                                    wall(log, "Done reading smartcard, you may remove it now");
+                                    log.log(loga::INFO, "Done reading smartcard, you may now remove it");
                                     return Ok(
                                         from_utf8(decrypted)
                                             .context("Key file contains invalid utf-8")?
@@ -584,8 +523,14 @@ struct LsblkDevice {
 
 fn volume_setup() -> Result<(), loga::Error> {
     let args = vark::<Args>();
-    let log = Log::new_root(loga::INFO);
+    let log = Log::new_root(if args.debug.is_some() {
+        loga::DEBUG
+    } else {
+        loga::INFO
+    });
     let outer_uuid = args.uuid.unwrap_or_else(|| OUTER_UUID.to_string());
+    let outer_uuid_dev_path = PathBuf::from(format!("/dev/disk/by-uuid/{}", &outer_uuid));
+    let inner_uuid_dev_path = PathBuf::from(format!("/dev/disk/by-uuid/{}", &INNER_UUID));
     let mount_path =
         args
             .mountpoint
@@ -597,6 +542,7 @@ fn volume_setup() -> Result<(), loga::Error> {
 
     // Mounting - helper methods
     let format = |dev_path: &Path, uuid: &str| -> Result<PathBuf, loga::Error> {
+        log.log_with(loga::INFO, "Creating filesystem", ea!(dev = dev_path.dbg_str()));
         Command::new("mkfs.ext4")
             .arg("-F")
             .arg(dev_path)
@@ -658,6 +604,11 @@ fn volume_setup() -> Result<(), loga::Error> {
             );
         }
         if value != "active" {
+            log.log_with(
+                loga::INFO,
+                "Mounting filesystem",
+                ea!(dev = fs_dev_path.dbg_str(), mountpoint = mount_path.dbg_str()),
+            );
             Command::new("systemd-mount")
                 .arg("--options=noatime")
                 .arg(fs_dev_path)
@@ -674,10 +625,11 @@ fn volume_setup() -> Result<(), loga::Error> {
         if mapper_dev_path.exists() {
             return Ok(mapper_dev_path);
         }
+        log.log_with(loga::INFO, "Unlocking LUKS device", ea!(dev = outer_uuid_dev_path.dbg_str()));
         Command::new("cryptsetup")
             .arg("open")
             .arg("--key-file=-")
-            .arg(format!("/dev/disk/by-uuid/{}", &outer_uuid))
+            .arg(&outer_uuid_dev_path)
             .arg(mapper_name)
             .simple()
             .run_stdin(key.as_bytes())
@@ -707,11 +659,11 @@ fn volume_setup() -> Result<(), loga::Error> {
                 continue;
             }
 
-            // Does the setup volume already exist?
+            // Does the volume already exist?
             let uuid = candidate.uuid.as_ref().map(|u| u.as_str());
             if uuid == Some(&outer_uuid) {
                 log.log_with(loga::INFO, "Found persistent disk", ea!(disk = candidate.path));
-                break 'exists candidate;
+                break 'exists_outer candidate;
             }
 
             // Skip in-use devices
@@ -754,7 +706,8 @@ fn volume_setup() -> Result<(), loga::Error> {
             "Couldn't find persistent disk, formatting best attached candidate disk",
             ea!(disk = candidate.path),
         );
-        if let Some(key) = get_key(&log, &args.encrypted.unwrap_or_default(), true)? {
+        if let Some(key) = get_key(&log, &args.encryption.unwrap_or_default(), true)? {
+            log.log_with(loga::INFO, "Initializing LUKS device", ea!(dev = candidate.path.dbg_str()));
             Command::new("cryptsetup")
                 .arg("luksFormat")
                 .arg("--type=luks2")
@@ -771,17 +724,47 @@ fn volume_setup() -> Result<(), loga::Error> {
                 .simple()
                 .run()
                 .context("Error setting UUID on newly encrypted volume on persistent disk")?;
-            let luks_dev_path = ensure_map_luks(&key).context("Error mapping new luks volume")?;
+            shed!{
+                'exists_outer1 _;
+                for _ in 0 .. 30 {
+                    if outer_uuid_dev_path.exists() {
+                        break 'exists_outer1;
+                    }
+                    sleep(Duration::from_secs(1));
+                }
+                return Err(
+                    loga::err_with(
+                        "LUKS source disk with UUID never appeared",
+                        ea!(path = outer_uuid_dev_path.dbg_str()),
+                    ),
+                );
+            }
+            let luks_dev_path = ensure_map_luks(&key).context("Error mapping new LUKS volume")?;
             let fs_dev_path = format(&luks_dev_path, INNER_UUID)?;
             ensure_mounted(&fs_dev_path)?;
         } else {
             let fs_dev_path = format(&PathBuf::from(&candidate.path), &outer_uuid)?;
             ensure_mounted(&fs_dev_path)?;
         }
-    } candidate = 'exists {
+    } candidate = 'exists_outer {
         // Found existing volume, just mount it
-        if let Some(key) = get_key(&log, &args.encrypted.unwrap_or_default(), false)? {
-            let fs_dev_path = ensure_map_luks(&key)?;
+        if let Some(key) = get_key(&log, &args.encryption.unwrap_or_default(), false)? {
+            let luks_dev_path = ensure_map_luks(&key)?;
+            let fs_dev_path = shed!{
+                'exists_inner1 _;
+                for _ in 0 .. 30 {
+                    if inner_uuid_dev_path.exists() {
+                        break 'exists_inner1 inner_uuid_dev_path;
+                    }
+                    sleep(Duration::from_secs(1));
+                }
+                log.log_with(
+                    loga::INFO,
+                    "Filesystem with UUID never appeared; assuming formatting never completed.",
+                    ea!(dev = inner_uuid_dev_path.dbg_str()),
+                );
+                break 'exists_inner1 format(&luks_dev_path, INNER_UUID)?;
+            };
             ensure_mounted(&fs_dev_path)?;
         } else {
             let fs_dev_path = PathBuf::from(&candidate.path);
