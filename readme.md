@@ -1,82 +1,58 @@
 # Volumesetup
 
-This is a small program to automatically set up attached storage.
+This is a small program to automatically set up attached storage on cloud or baremetal hosts at boot.
 
-Important information in bullet point form:
+It looks for an existing disk matching a well-known UUID and either unlocks and mounts it or formats and mounts the most suitable unused (not mounted) physical storage it finds.
 
-- Sets up the single largest unmounted physical (disk or usb) volume it detects
+It has three modes:
 
-- Pays existing data no mind. It won't wipe mounted disks, like the root disk, but all other disks are fair game
+- No encryption - provision an unencrypted disk
 
-- Cloud or bare metal
+- Shared image encryption - credentials are directly encrypt/decrypt the drive, and the image itself contains no encrypted data
 
-- Unencrypted or encrypted
+  Credentials can be provided programmatically (file/stdin) or interactively (systemd-ask-password)
 
-- Encrypted with a password or via a GPG smartcard, like a Yubikey
+- Private image encryption - the image contains an encrypted key used to encrypt/decrypt the drive
 
-- Encrypted with a GPG smartcard via NFC or USB
+  At the moment, credentials must be provided interactively (via gpg smartcard, via NFC or USB).
 
-## Help
-
-```
-$ volumesetup -h
-Usage: /mnt/scratch/cargo_target/debug/volumesetup [ ...OPT]
-
-    [--encrypted ENCRYPTION-MODE]  The encryption key, if the volume should be
-                                   encrypted. Otherwise unencrypted.
-    [--mountpoint <PATH>]          The mount point of the volume.  Defaults to
-                                   `/mnt/persistent`.
-    [--create-dirs <PATH>[ ...]]   Ensure these directories (and parents)
-                                   relative to the mountdir once it's mounted.
-
-ENCRYPTION-MODE: none | file | password | smartcard
-
-    none                 Disk is unencrypted.
-    file <PATH> | -      The contents of a text (utf8) file are used as the
-                         password.
-    password             `systemd-ask-password` will be used to query the
-                         password. The volume will be initialized/unlocked with
-                         the password.
-    smartcard smartcard  A GPG smartcard is used to decrypt a key file which is
-                         then used to initialize/unlock the volume. A prompt
-                         will be written to all system terminals. If your NFC
-                         reader has a light, the light will come on when it
-                         wants to unlock the key.
-
-smartcard: KEY-PATH PIN
-
-    KEY-PATH: <PATH>  The location of the key to use to initialize/unlock the
-                      volume. The key file should be an encrypted utf-8 string.
-                      Start and end whitespace will be stripped.
-    PIN: PIN-MODE     How to get the PIN.
-
-PIN-MODE: factory-default | numpad | text
-
-    factory-default   Use the default PIN (`123456`)
-    numpad            Use a numeric PIN entry, with a scrambled keypad prompt.
-                      Press the numpad keys that correspond positionally to the
-                      numbers displayed in the prompt. This accepts presses
-                      from the blocks (starting from the top left, left to
-                      right, top to bottom): `789456123` `uiojklm,.` or
-                      `wersdfxcv`.
-    text              Request an alphanumeric PIN.
-```
-
-Run `volumesetup --help` for possibly more up to date details.
+  Additional encrypted data can be included in the image which will be decrypted at unlock.
 
 ## Installation
 
-If you're building a system with Nix, add `default.nix` to `modules = [];`. See `default.nix` for parameters. You can either use the parameters to have a unit created automatically or call it yourself via `${pkgs.volumesetup}/bin/volumesetup`.
+### Nix
+
+Either have it run automatically like:
+
+```nix
+imports = [
+  ./volumesetup/source/module.nix
+];
+config = {
+  volumesetup.enable = true;
+  volumesetup.debug = true;
+  volumesetup.encryption = "private-image";
+  volumesetup.encryptionPrivateImageKeyfile = "${./smartcard_keyfile}";
+  volumesetup.encryptionPrivateImageMode = "smartcard";
+  volumesetup.encryptionPrivateImageSmartcardPinMode = "factory-default";
+};
+```
+
+Or import the package and call it yourself:
+
+```nix
+let volumesetup = (import ./volumesetup/source/package.nix { pkgs = pkgs; }); in "${volumesetup}/bin/volumesetup ..."
+```
+
+### Other systems
+
+Clone the repo and build it with `cargo build`. For smartcard support you need to enable the feature `smartcard`.
+
+### Smartcard
 
 Make sure the system has `pcscd` running and the correct `pcsc` drivers for your smartcard reader. You can test the reader with `opgpcard list`. `pscs_scan` and `pcsc-spy` may also help.
 
-Otherwise this is a normal Rust program you can clone and build with `cargo build`. For smartcard support you need to enable the feature `smartcard`.
-
-This is intended to be used at boot time. It uses `systemd-ask-password` to ask for PINs and passwords and writes to all `tty` and `pty` devices to indicate when to touch the smartcard.
-
-## Encrypting a key for smartcard decryption
-
-You can set up volume to be unlockable with any number of keys.
+Any number of smartcards can be used to unlock the volume. To use smartcard you need to prepare a keyfile encrypted with all keys you want to allow to unlock it:
 
 1. Get the ASCII Armored public keys (`person1.pubkey`, `person2.pubkey`, etc) for all keys you want to be able to unlock with
 
@@ -94,19 +70,19 @@ You can set up volume to be unlockable with any number of keys.
    sq encrypt -o disk.key --recipient-file person1.pubkey --recipient-file person2.pubkey ... disk.plaintext
    ```
 
-4. Place the file in the system image and run `volumesetup --encrypted smartcard /path/to/disk.key text` at boot.
+4. Place the file in the system image and run `volumesetup --encryption private-image --key /path/to/disk.key --key-mode smartcard text` at boot.
 
-### Doing it in Nix
+#### Nix
 
-You can also do it as part of your system build, if you're building a disk image on a secured build host, something like this:
+You can also do it as part of your system build, if you're building a disk image on a secured build host, with something like this:
 
 ```nix
 {
     imports = [ ./path/to/volumesetup/source/module.nix ];
     config = {
         volumesetup.enable = true;
-        volumesetup.encryption = "smartcard";
-        volumesetup.encryptionSmartcardKeyfile =
+        volumesetup.encryption = "private-image";
+        volumesetup.encryptionPrivateImageKeyfile =
             let key = derivation {
                 name = "volumesetup-key";
                 builder = "${pkgs.bash}/bin/bash";
@@ -116,6 +92,43 @@ You can also do it as part of your system build, if you're building a disk image
                         --recipient-file ${./person1.pubkey} \
                         --recipient-file ${./person2.pubkey} \
                         ${./disk.plaintext} \
+                        ;
+                '')];
+            }; in "${key}";
+        volumesetup.encryptionPrivateImageKeyMode = "smartcard";
+    };
+}
+```
+
+### Private-image additional decryption
+
+When using private-image mode an additional file can be decrypted by the key. This file could contain credentials or other non-dynamic private data. The file is [age](https://github.com/C2SP/C2SP/blob/main/age.md) passphrase-encrypted (symmetric).
+
+1. Create the file you want to place in the image, like `decrypt.txt`
+
+2. Encrypt it with `rage --encrypt --passphrase -o decrypt.age decrypt.txt < disk.plaintext`
+
+3. Pass an additional `--decrypt decrypt.age` argument to `volumesetup`
+
+#### Nix
+
+You can also do it with Nix, if you've already configured private-image mode:
+
+```nix
+{
+    imports = [ ./path/to/volumesetup/source/module.nix ];
+    config = {
+        volumesetup.encryptionPrivateImageDecrypt =
+            let key = derivation {
+                name = "volumesetup-decrypt";
+                builder = "${pkgs.bash}/bin/bash";
+                args = [(pkgs.writeText "volumesetup-decrypt-script" ''
+                    ${pkgs.rage}/bin/rage \
+                        --encrypt \
+                        --passphrase \
+                        -o $out \
+                        ${./decrypt.plaintext} \
+                        < ${./disk.plaintext} \
                         ;
                 '')];
             }; in "${key}";

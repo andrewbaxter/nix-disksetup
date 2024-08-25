@@ -36,8 +36,13 @@ use {
         fs::{
             create_dir_all,
             read,
+            OpenOptions,
         },
-        io::Write,
+        io::{
+            copy,
+            Write,
+        },
+        os::unix::fs::OpenOptionsExt,
         path::{
             Path,
             PathBuf,
@@ -55,6 +60,23 @@ const OUTER_UUID: &'static str = "3d02cfd4-968a-4fe4-a2a0-fe84614485f6";
 const INNER_UUID: &'static str = "0afee777-4fca-45c6-9bed-64bf3091536b";
 
 #[derive(Aargvark)]
+#[vark(placeholder = "KEY-MODE")]
+enum SharedImageKeyMode {
+    /// The contents of a text (utf8) file are used as the password.
+    File(AargvarkFile),
+    /// `systemd-ask-password` will be used to query the password. The volume will be
+    /// initialized/unlocked with the password.
+    Password,
+}
+
+#[derive(Aargvark)]
+struct SharedImageArgs {
+    /// How to unlock the volume
+    #[vark(flag = "--key-mode")]
+    key_mode: SharedImageKeyMode,
+}
+
+#[derive(Aargvark)]
 enum PinMode {
     /// Use the default PIN (`123456`)
     FactoryDefault,
@@ -69,34 +91,44 @@ enum PinMode {
 }
 
 #[derive(Aargvark)]
-enum EncryptionMode {
-    /// Disk is unencrypted.
-    None,
-    /// The contents of a text (utf8) file are used as the password.
-    File(AargvarkFile),
-    /// `systemd-ask-password` will be used to query the password. The volume will be
-    /// initialized/unlocked with the password.
-    Password,
+#[vark(placeholder = "KEY-MODE")]
+enum PrivateImageKeyMode {
     /// A GPG smartcard is used to decrypt a key file which is then used to
     /// initialize/unlock the volume. A prompt will be written to all system terminals.
     /// If your NFC reader has a light, the light will come on when it wants to unlock
     /// the key.
     #[cfg(feature = "smartcard")]
     Smartcard {
-        /// The location of the key to use to initialize/unlock the volume.
-        ///
-        /// The key file should be an encrypted utf-8 string. Start and end whitespace will
-        /// be stripped.
-        key_path: PathBuf,
         /// How to get the PIN.
         pin: PinMode,
     },
 }
 
-impl Default for EncryptionMode {
-    fn default() -> Self {
-        return Self::None;
-    }
+#[derive(Aargvark)]
+struct PrivateImageArgs {
+    /// The location of the key to use to initialize/unlock the volume.
+    ///
+    /// The key file should be an encrypted utf-8 string. Start and end whitespace will
+    /// be stripped.
+    #[vark(flag = "--key")]
+    key_path: PathBuf,
+    /// How to unlock the key file
+    #[vark(flag = "--key-mode")]
+    key_mode: PrivateImageKeyMode,
+    /// Additional data to decrypt. This will be written to
+    /// `/run/volumesetup_decrypted`.
+    decrypt: Option<PathBuf>,
+}
+
+#[derive(Aargvark)]
+#[vark(break_help)]
+enum EncryptionMode {
+    /// Disk is unencrypted.
+    None,
+    /// A password is used directly to encrypt the disk
+    SharedImage(SharedImageArgs),
+    /// A password in an encrypted file stored in the image is used to encrypt the disk
+    PrivateImage(PrivateImageArgs),
 }
 
 #[derive(Aargvark)]
@@ -104,7 +136,7 @@ struct Args {
     debug: Option<()>,
     /// Override the default UUID.
     uuid: Option<String>,
-    /// The encryption key, if the volume should be encrypted. Otherwise unencrypted.
+    /// How encryption should be handled.  Defaults to unencrypted.
     encryption: Option<EncryptionMode>,
     /// The mount point of the volume.  Defaults to `/mnt/persistent`.
     mountpoint: Option<PathBuf>,
@@ -192,25 +224,24 @@ impl<'a> SimpleCommand<'a> {
     }
 }
 
-fn get_key(log: &Log, encrypted: &EncryptionMode, confirm: bool) -> Result<Option<String>, loga::Error> {
-    fn ask_password(message: &str) -> Result<String, loga::Error> {
-        let raw =
-            Command::new("systemd-ask-password")
-                .arg("-n")
-                .arg("--timeout=0")
-                .arg(message)
-                .simple()
-                .run_stdout()
-                .context("Error asking for password")?;
-        return Ok(from_utf8(raw).context("Received password was invalid utf8")?.trim().to_string());
-    }
+fn ask_password(message: &str) -> Result<String, loga::Error> {
+    let raw =
+        Command::new("systemd-ask-password")
+            .arg("-n")
+            .arg("--timeout=0")
+            .arg(message)
+            .simple()
+            .run_stdout()
+            .context("Error asking for password")?;
+    return Ok(from_utf8(raw).context("Received password was invalid utf8")?.trim().to_string());
+}
 
-    match encrypted {
-        EncryptionMode::None => return Ok(None),
-        EncryptionMode::File(f) => {
-            return Ok(Some(from_utf8(f.value.clone()).context("Received password was invalid utf8")?));
+fn get_shared_image_key(key_mode: &SharedImageKeyMode, confirm: bool) -> Result<String, loga::Error> {
+    match key_mode {
+        SharedImageKeyMode::File(f) => {
+            return Ok(from_utf8(f.value.clone())?);
         },
-        EncryptionMode::Password => {
+        SharedImageKeyMode::Password => {
             let mut warning = None;
             loop {
                 let mut prompt = String::new();
@@ -226,19 +257,24 @@ fn get_key(log: &Log, encrypted: &EncryptionMode, confirm: bool) -> Result<Optio
                         continue;
                     }
                 }
-                return Ok(Some(pw1));
+                return Ok(pw1);
             }
         },
+    }
+}
+
+fn get_private_image_key(log: &Log, key_path: &Path, key_mode: &PrivateImageKeyMode) -> Result<String, loga::Error> {
+    let encrypted =
+        pgp::Message::from_armor_single(
+            &mut read(key_path)
+                .context_with("Error reading encrypted key", ea!(path = key_path.to_string_lossy()))?
+                .as_slice(),
+        )
+            .context("Encrypted data isn't valid ASCII Armor")?
+            .0;
+    match key_mode {
         #[cfg(feature = "smartcard")]
-        EncryptionMode::Smartcard { key_path, pin } => {
-            let encrypted =
-                pgp::Message::from_armor_single(
-                    &mut read(key_path)
-                        .context_with("Error reading encrypted key", ea!(path = key_path.to_string_lossy()))?
-                        .as_slice(),
-                )
-                    .context("Encrypted data isn't valid ASCII Armor")?
-                    .0;
+        PrivateImageKeyMode::Smartcard { pin } => {
             let mut pcsc_context =
                 pcsc::Context::establish(pcsc::Scope::User).context("Error setting up PCSC context")?;
             let mut watch: Vec<pcsc::ReaderState> = vec![];
@@ -383,7 +419,7 @@ fn get_key(log: &Log, encrypted: &EncryptionMode, confirm: bool) -> Result<Optio
                                     );
                                 })() {
                                     Ok(key) => {
-                                        return Ok(Some(key));
+                                        return Ok(key);
                                     },
                                     Err(e) => {
                                         log.log_err(loga::WARN, e.context("Failed to get volume key, retrying"));
@@ -397,7 +433,7 @@ fn get_key(log: &Log, encrypted: &EncryptionMode, confirm: bool) -> Result<Optio
                 }
             }
         },
-    };
+    }
 }
 
 trait SimpleCommandExt {
@@ -706,7 +742,7 @@ fn volume_setup() -> Result<(), loga::Error> {
             "Couldn't find persistent disk, formatting best attached candidate disk",
             ea!(disk = candidate.path),
         );
-        if let Some(key) = get_key(&log, &args.encryption.unwrap_or_default(), true)? {
+        let setup_encrypted = |key: &str| -> Result<(), loga::Error> {
             log.log_with(loga::INFO, "Initializing LUKS device", ea!(dev = candidate.path.dbg_str()));
             Command::new("cryptsetup")
                 .arg("luksFormat")
@@ -742,14 +778,26 @@ fn volume_setup() -> Result<(), loga::Error> {
             let luks_dev_path = ensure_map_luks(&key).context("Error mapping new LUKS volume")?;
             let fs_dev_path = format(&luks_dev_path, INNER_UUID)?;
             ensure_mounted(&fs_dev_path)?;
-        } else {
-            let fs_dev_path = format(&PathBuf::from(&candidate.path), &outer_uuid)?;
-            ensure_mounted(&fs_dev_path)?;
+            return Ok(());
+        };
+        match args.encryption.unwrap_or(EncryptionMode::None) {
+            EncryptionMode::None => {
+                let fs_dev_path = format(&PathBuf::from(&candidate.path), &outer_uuid)?;
+                ensure_mounted(&fs_dev_path)?;
+            },
+            EncryptionMode::SharedImage(enc_args) => {
+                let key = get_shared_image_key(&enc_args.key_mode, true)?;
+                setup_encrypted(&key)?;
+            },
+            EncryptionMode::PrivateImage(enc_args) => {
+                let key = get_private_image_key(&log, &enc_args.key_path, &enc_args.key_mode)?;
+                setup_encrypted(&key)?;
+            },
         }
     } candidate = 'exists_outer {
         // Found existing volume, just mount it
-        if let Some(key) = get_key(&log, &args.encryption.unwrap_or_default(), false)? {
-            let luks_dev_path = ensure_map_luks(&key)?;
+        let mount_encrypted = |key: &str| -> Result<(), loga::Error> {
+            let luks_dev_path = ensure_map_luks(key)?;
             let fs_dev_path = shed!{
                 'exists_inner1 _;
                 for _ in 0 .. 30 {
@@ -766,9 +814,53 @@ fn volume_setup() -> Result<(), loga::Error> {
                 break 'exists_inner1 format(&luks_dev_path, INNER_UUID)?;
             };
             ensure_mounted(&fs_dev_path)?;
-        } else {
-            let fs_dev_path = PathBuf::from(&candidate.path);
-            ensure_mounted(&fs_dev_path)?;
+            return Ok(());
+        };
+        match args.encryption.unwrap_or(EncryptionMode::None) {
+            EncryptionMode::None => {
+                let fs_dev_path = PathBuf::from(&candidate.path);
+                ensure_mounted(&fs_dev_path)?;
+            },
+            EncryptionMode::SharedImage(enc_args) => {
+                let key = get_shared_image_key(&enc_args.key_mode, false)?;
+                mount_encrypted(&key)?;
+            },
+            EncryptionMode::PrivateImage(enc_args) => {
+                let key = get_private_image_key(&log, &enc_args.key_path, &enc_args.key_mode)?;
+                mount_encrypted(&key)?;
+                if let Some(decrypt) = enc_args.decrypt {
+                    let log = log.fork(ea!(path = decrypt.dbg_str()));
+                    let decrypted_path = "/run/volumesetup_decrypted";
+                    copy(
+                        &mut match age::Decryptor::new(
+                            &mut read(&decrypt)
+                                .stack_context(&log, "Error reading additional file to decrypt")?
+                                .as_slice(),
+                        ).stack_context(&log, "Error reading additional file to decrypt")? {
+                            age::Decryptor::Passphrase(d) => d,
+                            _ => {
+                                return Err(
+                                    log.err(
+                                        "Additional file to decrypt must use passphrase (symmetric) age encryption, but was asymmetric",
+                                    ),
+                                );
+                            },
+                        }
+                            .decrypt(&age::secrecy::Secret::new(key.clone()), None)
+                            .stack_context(&log, "Error decrypting additional file to decrypt")?,
+                        &mut OpenOptions::new()
+                            .mode(0o600)
+                            .write(true)
+                            .create(true)
+                            .truncate(true)
+                            .open(decrypted_path)
+                            .context_with(
+                                "Error opening additional file to decrypt destination path",
+                                ea!(path = decrypted_path),
+                            )?,
+                    ).stack_context_with(&log, "Error writing file", ea!(dest_path = decrypted_path))?;
+                }
+            },
         }
     });
 
