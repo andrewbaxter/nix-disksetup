@@ -70,7 +70,12 @@
     {
       systemd.services = lib.mkIf cfg.enable {
         volumesetup = {
-          wantedBy = [ "multi-user.target" ];
+          wantedBy = [ "local-fs.target" ];
+          after = [
+            "local-fs.target"
+            # For pcscd
+            "sockets.target"
+          ];
           serviceConfig.Type = "oneshot";
           serviceConfig.RemainAfterExit = "yes";
           startLimitIntervalSec = 0;
