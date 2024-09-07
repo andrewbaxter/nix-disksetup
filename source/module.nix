@@ -93,12 +93,17 @@
                   ++ [ "--mountpoint ${cfg.mountpoint}" ]
                   ++ {
                     "none" = [ ];
-                    "shared-image" = [ "--encryption" "shared-image" ] ++ {
-                      "password" = [ "--key-mode" "password" ];
-                    }.${cfg.encryptionSharedImageMode};
-                    "private-image" = [ "--encryption" "private-image" "--key" cfg.encryptionPrivateImageKeyfile ] ++ {
-                      "smartcard" = [ "--key-mode" "smartcard" cfg.encryptionSmartcardPinMode ];
-                    }.${cfg.encryptionPrivateImageMode};
+                    "shared-image" =
+                      [ "--encryption" "shared-image" ]
+                      ++ {
+                        "password" = [ "--key-mode" "password" ];
+                      }.${cfg.encryptionSharedImageMode};
+                    "private-image" =
+                      [ "--encryption" "private-image" "--key" cfg.encryptionPrivateImageKeyfile ]
+                      ++ {
+                        "smartcard" = [ "--key-mode" "smartcard" cfg.encryptionPrivateImageSmartcardPinMode ];
+                      }.${cfg.encryptionPrivateImageMode}
+                      ++ (lib.lists.optionals (cfg.encryptionPrivateImageDecrypt != "") [ "--decrypt" cfg.encryptionPrivateImageDecrypt ]);
                   }.${cfg.encryption}
                   ++ (lib.lists.optionals (cfg.ensureDirs != [ ]) [ "--ensure-dirs" ] ++ cfg.ensureDirs)
                 );

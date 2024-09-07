@@ -1,8 +1,8 @@
 use {
     aargvark::{
+        traits_impls::AargvarkFile,
         vark,
         Aargvark,
-        AargvarkFile,
     },
     flowcontrol::{
         shed,
@@ -24,6 +24,14 @@ use {
         prelude::SliceRandom,
         thread_rng,
     },
+    sequoia_openpgp::{
+        crypto::Password,
+        parse::{
+            stream::DecryptorBuilder,
+            Parse,
+        },
+        policy::StandardPolicy,
+    },
     serde::{
         de::DeserializeOwned,
         Deserialize,
@@ -36,6 +44,7 @@ use {
         fs::{
             create_dir_all,
             read,
+            File,
             OpenOptions,
         },
         io::{
@@ -115,7 +124,7 @@ struct PrivateImageArgs {
     /// How to unlock the key file
     #[vark(flag = "--key-mode")]
     key_mode: PrivateImageKeyMode,
-    /// Additional data to decrypt. This will be written to
+    /// Additional data to decrypt. The decrypted data will be written to
     /// `/run/volumesetup_decrypted`.
     decrypt: Option<PathBuf>,
 }
@@ -831,23 +840,76 @@ fn volume_setup() -> Result<(), loga::Error> {
                 if let Some(decrypt) = enc_args.decrypt {
                     let log = log.fork(ea!(path = decrypt.dbg_str()));
                     let decrypted_path = "/run/volumesetup_decrypted";
-                    copy(
-                        &mut match age::Decryptor::new(
-                            &mut read(&decrypt)
-                                .stack_context(&log, "Error reading additional file to decrypt")?
-                                .as_slice(),
-                        ).stack_context(&log, "Error reading additional file to decrypt")? {
-                            age::Decryptor::Passphrase(d) => d,
-                            _ => {
-                                return Err(
-                                    log.err(
-                                        "Additional file to decrypt must use passphrase (symmetric) age encryption, but was asymmetric",
-                                    ),
-                                );
-                            },
+
+                    struct Helper {
+                        key: Password,
+                    }
+
+                    impl sequoia_openpgp::parse::stream::DecryptionHelper for Helper {
+                        fn decrypt<
+                            D,
+                        >(
+                            &mut self,
+                            _pkesks: &[sequoia_openpgp::packet::PKESK],
+                            skesks: &[sequoia_openpgp::packet::SKESK],
+                            _sym_algo: Option<sequoia_openpgp::types::SymmetricAlgorithm>,
+                            mut decrypt: D,
+                        ) -> sequoia_openpgp::Result<Option<sequoia_openpgp::Fingerprint>>
+                        where
+                            D:
+                                FnMut(
+                                    sequoia_openpgp::types::SymmetricAlgorithm,
+                                    &sequoia_openpgp::crypto::SessionKey,
+                                ) -> bool {
+                            'next_skesk: for skesk in skesks {
+                                let Ok((algo, sk)) = skesk.decrypt(&self.key) else {
+                                    continue 'next_skesk;
+                                };
+                                if !decrypt(algo, &sk) {
+                                    continue 'next_skesk;
+                                }
+                                return Ok(None);
+                            }
+                            Ok(None)
                         }
-                            .decrypt(&age::secrecy::Secret::new(key.clone()), None)
-                            .stack_context(&log, "Error decrypting additional file to decrypt")?,
+                    }
+
+                    impl sequoia_openpgp::parse::stream::VerificationHelper for Helper {
+                        fn get_certs(
+                            &mut self,
+                            _ids: &[sequoia_openpgp::KeyHandle],
+                        ) -> sequoia_openpgp::Result<Vec<sequoia_openpgp::Cert>> {
+                            Ok(Vec::new())
+                        }
+
+                        fn check(
+                            &mut self,
+                            _structure: sequoia_openpgp::parse::stream::MessageStructure,
+                        ) -> sequoia_openpgp::Result<()> {
+                            Ok(())
+                        }
+                    }
+
+                    copy(
+                        &mut DecryptorBuilder::from_reader(
+                            File::open(
+                                &decrypt,
+                            ).context_with("Error opening additional file to decrypt", ea!(path = decrypt.dbg_str()))?,
+                        )
+                            .map_err(
+                                |e| loga::err(
+                                    e.to_string(),
+                                ).context_with(
+                                    "Error creating decryptor builder from file to decrypt",
+                                    ea!(path = decrypt.dbg_str()),
+                                ),
+                            )?
+                            .with_policy(&StandardPolicy::new(), None, Helper { key: Password::from(key) })
+                            .map_err(
+                                |e| loga::err(
+                                    e.to_string(),
+                                ).context_with("Decryption failed", ea!(path = decrypt.dbg_str())),
+                            )?,
                         &mut OpenOptions::new()
                             .mode(0o600)
                             .write(true)

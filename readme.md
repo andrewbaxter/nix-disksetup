@@ -59,7 +59,7 @@ Any number of smartcards can be used to unlock the volume. To use smartcard you 
 2. Create a disk key
 
    ```
-   pwgen --symbols --secure 100 1 > disk.plaintext
+   pwgen --symbols --secure 100 1 > diskkey.plaintext
    ```
 
    Make sure to back this up in case you want to replace keys in the future.
@@ -67,10 +67,10 @@ Any number of smartcards can be used to unlock the volume. To use smartcard you 
 3. Encrypt the disk key, using `sq` or another GPG client
 
    ```
-   sq encrypt -o disk.key --recipient-file person1.pubkey --recipient-file person2.pubkey ... disk.plaintext
+   sq encrypt -o diskkey --recipient-file person1.pubkey --recipient-file person2.pubkey ... diskkey.plaintext
    ```
 
-4. Place the file in the system image and run `volumesetup --encryption private-image --key /path/to/disk.key --key-mode smartcard text` at boot.
+4. Place the file in the system image and run `volumesetup --encryption private-image --key /path/to/diskkey --key-mode smartcard text` at boot.
 
 #### Nix
 
@@ -85,13 +85,14 @@ You can also do it as part of your system build, if you're building a disk image
         volumesetup.encryptionPrivateImageKeyfile =
             let key = derivation {
                 name = "volumesetup-key";
+                system = builtins.currentSystem;
                 builder = "${pkgs.bash}/bin/bash";
                 args = [(pkgs.writeText "volumesetup-key-script" ''
-                    ${pkgs.sequoia-sq}/bin/sq \
-                        -o $out \
+                    ${pkgs.sequoia-sq}/bin/sq encrypt \
                         --recipient-file ${./person1.pubkey} \
                         --recipient-file ${./person2.pubkey} \
-                        ${./disk.plaintext} \
+                        --output $out \
+                        ${./diskkey.plaintext} \
                         ;
                 '')];
             }; in "${key}";
@@ -102,11 +103,11 @@ You can also do it as part of your system build, if you're building a disk image
 
 ### Private-image additional decryption
 
-When using private-image mode an additional file can be decrypted by the key. This file could contain credentials or other non-dynamic private data. The file is [age](https://github.com/C2SP/C2SP/blob/main/age.md) passphrase-encrypted (symmetric).
+When using private-image mode an additional file can be decrypted by the key. This file could contain credentials or other non-dynamic private data. The file is PGP passphrase-encrypted (symmetric).
 
 1. Create the file you want to place in the image, like `decrypt.txt`
 
-2. Encrypt it with `rage --encrypt --passphrase -o decrypt.age decrypt.txt < disk.plaintext`
+2. Encrypt it with `rage --encrypt --passphrase -o decrypt.age decrypt.txt < diskkey.plaintext`
 
 3. Pass an additional `--decrypt decrypt.age` argument to `volumesetup`
 
@@ -120,15 +121,14 @@ You can also do it with Nix, if you've already configured private-image mode:
     config = {
         volumesetup.encryptionPrivateImageDecrypt =
             let key = derivation {
-                name = "volumesetup-decrypt";
+                name = "volumesetup-decrypt-encrypt";
+                system = builtins.currentSystem;
                 builder = "${pkgs.bash}/bin/bash";
-                args = [(pkgs.writeText "volumesetup-decrypt-script" ''
-                    ${pkgs.rage}/bin/rage \
-                        --encrypt \
-                        --passphrase \
-                        -o $out \
-                        ${./decrypt.plaintext} \
-                        < ${./disk.plaintext} \
+                args = [(pkgs.writeText "volumesetup-decrypt-encrypt-script" ''
+                    ${pkgs.sequoia-sq}/bin/sq encrypt \
+                        --password-file ${./diskkey.plaintext} \
+                        --output $out \
+                        ${decrypt} \
                         ;
                 '')];
             }; in "${key}";
