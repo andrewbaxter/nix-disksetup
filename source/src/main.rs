@@ -627,7 +627,7 @@ fn volume_setup() -> Result<(), loga::Error> {
                 Command::new("systemctl")
                     .arg("show")
                     .arg("--property=ActiveState")
-                    .arg(&systemd_mount_name)
+                    .arg(systemd_mount_name.trim())
                     .simple()
                     .run_stdout()
                     .context("Error checking mount unit active state")?,
@@ -652,7 +652,7 @@ fn volume_setup() -> Result<(), loga::Error> {
             log.log_with(
                 loga::INFO,
                 "Mounting filesystem",
-                ea!(dev = fs_dev_path.dbg_str(), mountpoint = mount_path.dbg_str()),
+                ea!(dev = fs_dev_path.dbg_str(), mountpoint = mount_path.dbg_str(), unit_state = value),
             );
             Command::new("systemd-mount")
                 .arg("--options=noatime")
