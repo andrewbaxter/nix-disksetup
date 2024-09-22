@@ -656,6 +656,7 @@ fn volume_setup() -> Result<(), loga::Error> {
             );
             Command::new("systemd-mount")
                 .arg("--options=noatime")
+                .arg("--collect")
                 .arg(fs_dev_path)
                 .arg(&mount_path)
                 .simple()
@@ -680,6 +681,94 @@ fn volume_setup() -> Result<(), loga::Error> {
             .run_stdin(key.as_bytes())
             .context("Error opening existing encrypted volume")?;
         return Ok(mapper_dev_path);
+    };
+    let decrypt_extra = |key: &str, data_path: &Option<PathBuf>| -> Result<(), loga::Error> {
+        if let Some(data_path) = data_path {
+            let log = log.fork(ea!(path = data_path.dbg_str()));
+            let decrypted_path = "/run/volumesetup_decrypted";
+
+            struct Helper {
+                key: Password,
+            }
+
+            impl sequoia_openpgp::parse::stream::DecryptionHelper for Helper {
+                fn decrypt<
+                    D,
+                >(
+                    &mut self,
+                    _pkesks: &[sequoia_openpgp::packet::PKESK],
+                    skesks: &[sequoia_openpgp::packet::SKESK],
+                    _sym_algo: Option<sequoia_openpgp::types::SymmetricAlgorithm>,
+                    mut decrypt: D,
+                ) -> sequoia_openpgp::Result<Option<sequoia_openpgp::Fingerprint>>
+                where
+                    D:
+                        FnMut(
+                            sequoia_openpgp::types::SymmetricAlgorithm,
+                            &sequoia_openpgp::crypto::SessionKey,
+                        ) -> bool {
+                    'next_skesk: for skesk in skesks {
+                        let Ok((algo, sk)) = skesk.decrypt(&self.key) else {
+                            continue 'next_skesk;
+                        };
+                        if !decrypt(algo, &sk) {
+                            continue 'next_skesk;
+                        }
+                        return Ok(None);
+                    }
+                    Ok(None)
+                }
+            }
+
+            impl sequoia_openpgp::parse::stream::VerificationHelper for Helper {
+                fn get_certs(
+                    &mut self,
+                    _ids: &[sequoia_openpgp::KeyHandle],
+                ) -> sequoia_openpgp::Result<Vec<sequoia_openpgp::Cert>> {
+                    Ok(Vec::new())
+                }
+
+                fn check(
+                    &mut self,
+                    _structure: sequoia_openpgp::parse::stream::MessageStructure,
+                ) -> sequoia_openpgp::Result<()> {
+                    Ok(())
+                }
+            }
+
+            copy(
+                &mut DecryptorBuilder::from_reader(
+                    File::open(
+                        &data_path,
+                    ).context_with("Error opening additional file to decrypt", ea!(path = data_path.dbg_str()))?,
+                )
+                    .map_err(
+                        |e| loga::err(
+                            e.to_string(),
+                        ).context_with(
+                            "Error creating decryptor builder from file to decrypt",
+                            ea!(path = data_path.dbg_str()),
+                        ),
+                    )?
+                    .with_policy(&StandardPolicy::new(), None, Helper { key: Password::from(key) })
+                    .map_err(
+                        |e| loga::err(
+                            e.to_string(),
+                        ).context_with("Decryption failed", ea!(path = data_path.dbg_str())),
+                    )?,
+                &mut OpenOptions::new()
+                    .mode(0o600)
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open(decrypted_path)
+                    .context_with(
+                        "Error opening additional file to decrypt destination path",
+                        ea!(path = decrypted_path),
+                    )?,
+            ).stack_context_with(&log, "Error writing file", ea!(dest_path = decrypted_path))?;
+        }
+        return Ok(());
     };
     let blocks =
         Command::new("lsblk")
@@ -801,6 +890,7 @@ fn volume_setup() -> Result<(), loga::Error> {
             EncryptionMode::PrivateImage(enc_args) => {
                 let key = get_private_image_key(&log, &enc_args.key_path, &enc_args.key_mode)?;
                 setup_encrypted(&key)?;
+                decrypt_extra(&key, &enc_args.decrypt)?;
             },
         }
     } candidate = 'exists_outer {
@@ -837,91 +927,7 @@ fn volume_setup() -> Result<(), loga::Error> {
             EncryptionMode::PrivateImage(enc_args) => {
                 let key = get_private_image_key(&log, &enc_args.key_path, &enc_args.key_mode)?;
                 mount_encrypted(&key)?;
-                if let Some(decrypt) = enc_args.decrypt {
-                    let log = log.fork(ea!(path = decrypt.dbg_str()));
-                    let decrypted_path = "/run/volumesetup_decrypted";
-
-                    struct Helper {
-                        key: Password,
-                    }
-
-                    impl sequoia_openpgp::parse::stream::DecryptionHelper for Helper {
-                        fn decrypt<
-                            D,
-                        >(
-                            &mut self,
-                            _pkesks: &[sequoia_openpgp::packet::PKESK],
-                            skesks: &[sequoia_openpgp::packet::SKESK],
-                            _sym_algo: Option<sequoia_openpgp::types::SymmetricAlgorithm>,
-                            mut decrypt: D,
-                        ) -> sequoia_openpgp::Result<Option<sequoia_openpgp::Fingerprint>>
-                        where
-                            D:
-                                FnMut(
-                                    sequoia_openpgp::types::SymmetricAlgorithm,
-                                    &sequoia_openpgp::crypto::SessionKey,
-                                ) -> bool {
-                            'next_skesk: for skesk in skesks {
-                                let Ok((algo, sk)) = skesk.decrypt(&self.key) else {
-                                    continue 'next_skesk;
-                                };
-                                if !decrypt(algo, &sk) {
-                                    continue 'next_skesk;
-                                }
-                                return Ok(None);
-                            }
-                            Ok(None)
-                        }
-                    }
-
-                    impl sequoia_openpgp::parse::stream::VerificationHelper for Helper {
-                        fn get_certs(
-                            &mut self,
-                            _ids: &[sequoia_openpgp::KeyHandle],
-                        ) -> sequoia_openpgp::Result<Vec<sequoia_openpgp::Cert>> {
-                            Ok(Vec::new())
-                        }
-
-                        fn check(
-                            &mut self,
-                            _structure: sequoia_openpgp::parse::stream::MessageStructure,
-                        ) -> sequoia_openpgp::Result<()> {
-                            Ok(())
-                        }
-                    }
-
-                    copy(
-                        &mut DecryptorBuilder::from_reader(
-                            File::open(
-                                &decrypt,
-                            ).context_with("Error opening additional file to decrypt", ea!(path = decrypt.dbg_str()))?,
-                        )
-                            .map_err(
-                                |e| loga::err(
-                                    e.to_string(),
-                                ).context_with(
-                                    "Error creating decryptor builder from file to decrypt",
-                                    ea!(path = decrypt.dbg_str()),
-                                ),
-                            )?
-                            .with_policy(&StandardPolicy::new(), None, Helper { key: Password::from(key) })
-                            .map_err(
-                                |e| loga::err(
-                                    e.to_string(),
-                                ).context_with("Decryption failed", ea!(path = decrypt.dbg_str())),
-                            )?,
-                        &mut OpenOptions::new()
-                            .mode(0o600)
-                            .write(true)
-                            .create(true)
-                            .truncate(true)
-                            .open(decrypted_path)
-                            .context_with(
-                                "Error opening additional file to decrypt destination path",
-                                ea!(path = decrypted_path),
-                            )?,
-                    ).stack_context_with(&log, "Error writing file", ea!(dest_path = decrypted_path))?;
-                }
+                decrypt_extra(&key, &enc_args.decrypt)?;
             },
         }
     });
