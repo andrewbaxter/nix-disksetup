@@ -4,7 +4,13 @@ This is a small program to automatically set up attached storage on cloud or bar
 
 It looks for an existing disk matching a well-known UUID and either unlocks and mounts it or formats and mounts the most suitable unused (not mounted) physical storage it finds.
 
-It has three modes:
+It has two filesystems:
+
+- `ext4` - The largest disk is selected and formatted
+
+- `bcachefs` - All unused disks are added, if new disks are found at boot they will be added, and missing/failed disks will be removed
+
+It has three encryption methods:
 
 - No encryption - provision an unencrypted disk
 
@@ -26,15 +32,12 @@ Either have it run automatically like:
 
 ```nix
 imports = [
-  ./volumesetup/source/module.nix
+    ./volumesetup/source/module.nix
 ];
 config = {
-  volumesetup.enable = true;
-  volumesetup.debug = true;
-  volumesetup.encryption = "private-image";
-  volumesetup.encryptionPrivateImageKeyfile = "${./smartcard_keyfile}";
-  volumesetup.encryptionPrivateImageMode = "smartcard";
-  volumesetup.encryptionPrivateImageSmartcardPinMode = "factory-default";
+    volumesetup = {
+        enable = true;
+    };
 };
 ```
 
@@ -42,6 +45,32 @@ Or import the package and call it yourself:
 
 ```nix
 let volumesetup = (import ./volumesetup/source/package.nix { pkgs = pkgs; }); in "${volumesetup}/bin/volumesetup ..."
+```
+
+The above minimal config will format the largest unused disk as ext4, unencrypted.
+
+Here's another example with smartcard encryption:
+
+```nix
+imports = [
+    ./volumesetup/source/module.nix
+];
+config = {
+    volumesetup = {
+        enable = true;
+        debug = true;
+        encryption = {
+            private_image = {
+                key_path = "${./smartcard_keyfile}";
+                key_mode = {
+                    smartcard = {
+                        pin = "factory_default";
+                    };
+                };
+            };
+        };
+    };
+};
 ```
 
 ### Other systems
@@ -81,22 +110,23 @@ You can also do it as part of your system build, if you're building a disk image
     imports = [ ./path/to/volumesetup/source/module.nix ];
     config = {
         volumesetup.enable = true;
-        volumesetup.encryption = "private-image";
-        volumesetup.encryptionPrivateImageKeyfile =
-            let key = derivation {
-                name = "volumesetup-key";
-                system = builtins.currentSystem;
-                builder = "${pkgs.bash}/bin/bash";
-                args = [(pkgs.writeText "volumesetup-key-script" ''
-                    ${pkgs.sequoia-sq}/bin/sq encrypt \
-                        --recipient-file ${./person1.pubkey} \
-                        --recipient-file ${./person2.pubkey} \
-                        --output $out \
-                        ${./diskkey.plaintext} \
-                        ;
-                '')];
-            }; in "${key}";
-        volumesetup.encryptionPrivateImageKeyMode = "smartcard";
+        volumesetup.encryption.private_image{
+            key_path =
+                let key = derivation {
+                    name = "volumesetup-key";
+                    system = builtins.currentSystem;
+                    builder = "${pkgs.bash}/bin/bash";
+                    args = [(pkgs.writeText "volumesetup-key-script" ''
+                        ${pkgs.sequoia-sq}/bin/sq encrypt \
+                            --recipient-file ${./person1.pubkey} \
+                            --recipient-file ${./person2.pubkey} \
+                            --output $out \
+                            ${./diskkey.plaintext} \
+                            ;
+                    '')];
+                }; in "${key}";
+            key_mode = "smartcard";
+        };
     };
 }
 ```
@@ -119,7 +149,7 @@ You can also do it with Nix, if you've already configured private-image mode:
 {
     imports = [ ./path/to/volumesetup/source/module.nix ];
     config = {
-        volumesetup.encryptionPrivateImageDecrypt =
+        volumesetup.encryption.private_image.decrypt =
             let key = derivation {
                 name = "volumesetup-decrypt-encrypt";
                 system = builtins.currentSystem;

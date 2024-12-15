@@ -1,67 +1,86 @@
 { config, pkgs, lib, ... }:
 {
   options = {
-    volumesetup = {
-      enable = lib.mkOption {
-        type = lib.types.bool;
-        default = false;
-        description = "Enable the volumesetup service to run at boot. See volumesetup documentation for default values for various parameters.";
-      };
-      debug = lib.mkOption {
-        type = lib.types.bool;
-        default = false;
-        description = "Enable debug logging.";
-      };
-      uuid = lib.mkOption {
-        type = lib.types.str;
-        default = "";
-        description = "Override the default UUID.";
-      };
-      mountpoint = lib.mkOption {
-        type = lib.types.str;
-        default = "/mnt/persistent";
-        description = "Where to mount the volume";
-      };
+    volumesetup =
+      let
+        taggedAttrUnion = spec: libtypes.addCheck (lib.types.submodule spec) (v: builtins.length (lib.attrsToList v) == 1);
+        taggedAttrEnumUnion = enumSpec: attrsSpec: lib.types.oneOf [
+          (lib.types.enum enumSpec)
+          (lib.types.addCheck (lib.types.submodule spec) (v: builtins.length (lib.attrsToList v) == 1))
+        ];
+      in
+      {
+        enable = lib.mkOption {
+          description = "Enable the volumesetup service to run at boot. See volumesetup documentation for default values for various parameters.";
+          default = false;
+          type = lib.types.bool;
+        };
+        debug = lib.mkOption {
+          default = false;
+          type = lib.types.bool;
+        };
+        uuid = lib.mkOption {
+          default = null;
+          type = lib.types.nullOr lib.types.str;
+        };
+        encryption = lib.mkOption {
+          default = null;
+          type = lib.types.nullOr taggedAttrEnumUnion [ "none" ] {
+            shared_image = lib.mkOption {
+              default = null;
+              type = lib.types.nullOr lib.types.submodule {
+                key_mode = lib.mkOption {
+                  type = taggedAttrUnion {
+                    file = lib.mkOption {
+                      default = null;
+                      type = lib.types.nullOr taggedEnumAttrUnion [ "password" ] {
+                        file = lib.mkOption {
+                          default = null;
+                          type = lib.types.nullOr lib.types.string;
+                        };
+                      };
+                    };
 
-      encryption = lib.mkOption {
-        type = lib.types.enum [ "none" "shared-image" "private-image" ];
-        default = "none";
-        description = "What mode to use to encrypt the volume. See the command arguments for more details.";
+                  };
+                };
+              };
+            };
+            private_image = lib.mkOption {
+              default = null;
+              type = lib.types.nullOr lib.types.submodule {
+                key_path = lib.mkOption {
+                  type = lib.types.str;
+                };
+                key_mode = lib.mkOption {
+                  type = taggedAttrUnion {
+                    smartcard = lib.mkOption {
+                      type = lib.types.submodule {
+                        pin = lib.types.enum [ "factory_default" "numpad" "text" ];
+                      };
+                    };
+                  };
+                };
+                decrypt = lib.mkOption {
+                  default = null;
+                  type = lib.types.nullOr lib.types.str;
+                };
+              };
+            };
+          };
+        };
+        fs = lib.mkOption {
+          default = null;
+          type = lib.types.enum [ "ext4" "bcachefs" ];
+        };
+        mountpoint = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+        };
+        ensure_dirs = lib.mkOption {
+          type = lib.types.nullOr (lib.types.listOf lib.types.str);
+          default = null;
+        };
       };
-
-      # Shared image encryption
-      encryptionSharedImageMode = lib.mkOption {
-        type = lib.types.enum [ "password" ];
-        default = "password";
-        description = "How to obtain the disk key for shared image encryption.";
-      };
-
-      # Private image
-      encryptionPrivateImageKeyfile = lib.mkOption {
-        type = lib.types.str;
-        description = "Path to encrypted key file for private-image encryption";
-      };
-      encryptionPrivateImageMode = lib.mkOption {
-        type = lib.types.enum [ "smartcard" ];
-        default = "smartcard";
-      };
-      encryptionPrivateImageSmartcardPinMode = lib.mkOption {
-        type = lib.types.enum [ "factory-default" "text" "numpad" ];
-        description = "How to get the PIN for the smartcard.";
-      };
-      encryptionPrivateImageDecrypt = lib.mkOption {
-        type = lib.types.str;
-        default = "";
-        description = "Optionally, a file encrypted with `age` encryption (using the keyfile key as the passphrase) to decrypt to `/run/volumesetup-decrypted`.";
-      };
-
-      # Post-mount
-      ensureDirs = lib.mkOption {
-        type = lib.types.listOf lib.types.str;
-        default = [ ];
-        description = "A list of paths of directories to create after mounting. These may be absolute or relative to the mountpoint.";
-      };
-    };
   };
   config =
     let
@@ -84,34 +103,9 @@
           script =
             let
               pkg = (import ./package.nix) { pkgs = pkgs; };
-              cmdline = lib.concatStringsSep " "
-                (
-                  [ ]
-                  ++ [ "${pkg}/bin/volumesetup" ]
-                  ++ (lib.lists.optionals cfg.debug [ "--debug" ])
-                  ++ (lib.lists.optionals (cfg.uuid != "") [ "--uuid ${cfg.uuid}" ])
-                  ++ [ "--mountpoint ${cfg.mountpoint}" ]
-                  ++ {
-                    "none" = [ ];
-                    "shared-image" =
-                      [ "--encryption" "shared-image" ]
-                      ++ {
-                        "password" = [ "--key-mode" "password" ];
-                      }.${cfg.encryptionSharedImageMode};
-                    "private-image" =
-                      [ "--encryption" "private-image" "--key" cfg.encryptionPrivateImageKeyfile ]
-                      ++ {
-                        "smartcard" = [ "--key-mode" "smartcard" cfg.encryptionPrivateImageSmartcardPinMode ];
-                      }.${cfg.encryptionPrivateImageMode}
-                      ++ (lib.lists.optionals (cfg.encryptionPrivateImageDecrypt != "") [ "--decrypt" cfg.encryptionPrivateImageDecrypt ]);
-                  }.${cfg.encryption}
-                  ++ (lib.lists.optionals (cfg.ensureDirs != [ ]) [ "--ensure-dirs" ] ++ cfg.ensureDirs)
-                );
+              config = pkgs.writeText "volumesetup-config" (builtins.toJSON (pkgs.lib.filterAttrsRecursive (name: value: value != null) cfg));
             in
-            ''
-              set -xeu
-              exec ${cmdline}
-            '';
+            "${pkg}/bin/volumesetup ${config}";
         };
       };
     };
