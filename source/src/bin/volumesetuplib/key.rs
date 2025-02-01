@@ -20,8 +20,8 @@ use {
     pcsc::Context,
     pgp::Deserializable,
     rand::{
-        thread_rng,
         prelude::SliceRandom,
+        thread_rng,
     },
     std::{
         collections::{
@@ -29,6 +29,10 @@ use {
             HashSet,
         },
         fs::read,
+        io::{
+            stdin,
+            Read,
+        },
         path::Path,
         process::Command,
         thread::sleep,
@@ -50,10 +54,15 @@ pub(crate) fn ask_password(message: &str) -> Result<String, loga::Error> {
 
 pub(crate) fn get_shared_image_key(key_mode: &SharedImageKeyMode, confirm: bool) -> Result<String, loga::Error> {
     match key_mode {
+        SharedImageKeyMode::Stdin => {
+            let mut data = Vec::new();
+            stdin().read_to_end(&mut data).context("Failed to read shared image key from stdin")?;
+            return Ok(from_utf8(data).context("Key must be utf-8")?);
+        },
         SharedImageKeyMode::File(f) => {
             let data =
                 read(f).context_with("Failed to read shared image key file", ea!(path = f.to_string_lossy()))?;
-            return Ok(from_utf8(data)?);
+            return Ok(from_utf8(data).context("Key must be utf-8")?);
         },
         SharedImageKeyMode::Password => {
             let mut warning = None;

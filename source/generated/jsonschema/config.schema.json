@@ -3,6 +3,12 @@
   "title": "Config",
   "type": "object",
   "properties": {
+    "$schema": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "debug": {
       "type": "null"
     },
@@ -55,6 +61,23 @@
   },
   "additionalProperties": false,
   "definitions": {
+    "DirectKeyArgs": {
+      "type": "object",
+      "required": [
+        "key_mode"
+      ],
+      "properties": {
+        "key_mode": {
+          "description": "How to unlock the volume",
+          "allOf": [
+            {
+              "$ref": "#/definitions/SharedImageKeyMode"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
     "EncryptionMode": {
       "oneOf": [
         {
@@ -65,27 +88,27 @@
           ]
         },
         {
-          "description": "A password is used directly to encrypt the disk",
+          "description": "A password is used directly to encrypt the disk.",
           "type": "object",
           "required": [
-            "shared_image"
+            "direct_key"
           ],
           "properties": {
-            "shared_image": {
-              "$ref": "#/definitions/SharedImageArgs"
+            "direct_key": {
+              "$ref": "#/definitions/DirectKeyArgs"
             }
           },
           "additionalProperties": false
         },
         {
-          "description": "A password in an encrypted file stored in the image is used to encrypt the disk",
+          "description": "A password in an encrypted file stored in the image is used to encrypt the disk. This allows alternate keys to be used to unlock the disk, such as multiple administrators.",
           "type": "object",
           "required": [
-            "private_image"
+            "indirect_key"
           ],
           "properties": {
-            "private_image": {
-              "$ref": "#/definitions/PrivateImageArgs"
+            "indirect_key": {
+              "$ref": "#/definitions/IndirectKeyArgs"
             }
           },
           "additionalProperties": false
@@ -110,32 +133,7 @@
         }
       ]
     },
-    "PinMode": {
-      "oneOf": [
-        {
-          "description": "Use the default PIN (`123456`)",
-          "type": "string",
-          "enum": [
-            "factory_default"
-          ]
-        },
-        {
-          "description": "Use a numeric PIN entry, with a scrambled keypad prompt. Press the numpad keys that correspond positionally to the numbers displayed in the prompt.\n\nThis accepts presses from the blocks (starting from the top left, left to right, top to bottom): `789456123` `uiojklm,.` or `wersdfxcv`.",
-          "type": "string",
-          "enum": [
-            "numpad"
-          ]
-        },
-        {
-          "description": "Request an alphanumeric PIN.",
-          "type": "string",
-          "enum": [
-            "text"
-          ]
-        }
-      ]
-    },
-    "PrivateImageArgs": {
+    "IndirectKeyArgs": {
       "type": "object",
       "required": [
         "key_mode",
@@ -163,6 +161,31 @@
         }
       },
       "additionalProperties": false
+    },
+    "PinMode": {
+      "oneOf": [
+        {
+          "description": "Use the default PIN (`123456`)",
+          "type": "string",
+          "enum": [
+            "factory_default"
+          ]
+        },
+        {
+          "description": "Use a numeric PIN entry, with a scrambled keypad prompt. Press the numpad keys that correspond positionally to the numbers displayed in the prompt.\n\nThis accepts presses from the blocks (starting from the top left, left to right, top to bottom): `789456123` `uiojklm,.` or `wersdfxcv`.",
+          "type": "string",
+          "enum": [
+            "numpad"
+          ]
+        },
+        {
+          "description": "Request an alphanumeric PIN.",
+          "type": "string",
+          "enum": [
+            "text"
+          ]
+        }
+      ]
     },
     "PrivateImageKeyMode": {
       "oneOf": [
@@ -195,25 +218,15 @@
         }
       ]
     },
-    "SharedImageArgs": {
-      "type": "object",
-      "required": [
-        "key_mode"
-      ],
-      "properties": {
-        "key_mode": {
-          "description": "How to unlock the volume",
-          "allOf": [
-            {
-              "$ref": "#/definitions/SharedImageKeyMode"
-            }
-          ]
-        }
-      },
-      "additionalProperties": false
-    },
     "SharedImageKeyMode": {
       "oneOf": [
+        {
+          "description": "Read the key from stdin directly.",
+          "type": "string",
+          "enum": [
+            "stdin"
+          ]
+        },
         {
           "description": "The contents of a text (utf8) file are used as the password.",
           "type": "object",

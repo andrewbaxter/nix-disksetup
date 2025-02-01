@@ -21,18 +21,12 @@
   config =
     let
       pkg = (import ./package.nix) { pkgs = pkgs; };
-      volumesetupConfig = pkgs.writeText "volumesetup-config" config.volumesetup.config;
-      validateConfig = derivation {
-        name = "volumesetup-validate-config";
-        system = builtins.currentSystem;
-        builder = "${pkgs.bash}/bin/bash";
-        args = [
-          (pkgs.writeShellScript "volumesetup-validate-config-run" ''
-            set -xeu
-            ${pkg}/bin/volumesetup demon run ${volumesetupConfig} --validate
-            touch $out
-          '')
-        ];
+      volumesetupConfig = pkgs.writeTextFile {
+        name = "volumesetup-config";
+        text = config.volumesetup.config;
+        checkPhase = ''
+          ${pkg}/bin/volumesetup demon run $out --validate
+        '';
       };
     in
     {
@@ -49,9 +43,7 @@
           startLimitIntervalSec = 0;
           serviceConfig.Restart = "on-failure";
           serviceConfig.RestartSec = 60;
-          script =
-            assert "${validateConfig}" != "";
-            "${pkg}/bin/volumesetup ${volumesetupConfig}";
+          script = "${pkg}/bin/volumesetup ${volumesetupConfig}";
         };
       };
       puteron.notifySystemd.["systemd-local-fs-target"] = true;
@@ -63,9 +55,7 @@
             # For pcscd
             "systemd-sockets-target" = "weak";
           };
-          command =
-            assert "${validateConfig}" != "";
-            [ "${pkg}/bin/volumesetup" "${volumesetupConfig}" ];
+          command = [ "${pkg}/bin/volumesetup" "${volumesetupConfig}" ];
         };
       };
     };

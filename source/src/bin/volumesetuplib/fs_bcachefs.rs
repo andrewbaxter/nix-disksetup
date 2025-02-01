@@ -16,14 +16,16 @@ use {
     },
     loga::{
         ea,
+        ErrContext,
         Log,
         ResultContext,
     },
     std::{
+        fs::read_dir,
+        os::unix::ffi::OsStrExt,
         path::PathBuf,
         process::Command,
     },
-    structre::structre,
 };
 
 fn mount(uuid: &str, mount_path: &PathBuf, key: Option<&String>) -> Result<(), loga::Error> {
@@ -42,97 +44,75 @@ fn mount(uuid: &str, mount_path: &PathBuf, key: Option<&String>) -> Result<(), l
 
 pub(crate) fn main(log: &Log, config: &Config, mount_path: &PathBuf) -> Result<(), loga::Error> {
     let uuid = config.uuid.as_ref().map(|x| x.as_str()).unwrap_or(OUTER_UUID);
-    if let Ok(info) =
+    if let Ok(_) =
         Command::new("bcachefs")
             .arg("show-super")
             .arg(format!("/dev/disk/by-uuid/{}", uuid))
             .simple()
             .run_stdout() {
-        let info = String::from_utf8(info).context("Bcachefs show-super output is invalid utf-8")?;
-
-        #[derive(Default, Debug)]
-        struct Device {
-            bcachefs_id: Option<usize>,
-            uuid: Option<String>,
-        }
-
-        let mut superblock_devices = vec![];
-        let mut last_index = 0;
-        for line in info.lines() {
-            let line = line.trim();
-            if line.len() == 0 {
-                continue;
-            }
-            let Some((k, v)) = line.split_once(":") else {
-                log.log_with(loga::DEBUG, "Non kv line in bcachefs show-super output", ea!(line = line));
-                continue;
-            };
-            let v = v.trim();
-            match k {
-                "Device" => {
-                    superblock_devices.push(Device::default());
-                },
-                "  Label" => {
-                    #[structre("d(?<label_index>\\d+) \\((?<id>\\d+)\\)")]
-                    struct Label {
-                        label_index: usize,
-                        id: usize,
-                    }
-
-                    let label =
-                        Label::try_from(v).map_err(loga::err).context("Bcachefs has disk with invalid label")?;
-                    superblock_devices.last_mut().unwrap().bcachefs_id = Some(label.id);
-                    if label.label_index > last_index {
-                        last_index = label.label_index;
-                    }
-                },
-                "  UUID" => {
-                    superblock_devices.last_mut().unwrap().uuid = Some(v.to_string());
-                },
-                _ => { },
-            }
-        }
-
-        // Mount
+        // Mount - can't add/remove until that's done
         let key;
         match config.encryption.as_ref().unwrap_or(&crate::config::EncryptionMode::None {}) {
             crate::config::EncryptionMode::None {} => {
                 key = None;
             },
-            crate::config::EncryptionMode::SharedImage(enc_args) => {
+            crate::config::EncryptionMode::DirectKey(enc_args) => {
                 key = Some(get_shared_image_key(&enc_args.key_mode, true)?);
             },
-            crate::config::EncryptionMode::PrivateImage(enc_args) => {
+            crate::config::EncryptionMode::IndirectKey(enc_args) => {
                 key = Some(get_private_image_key(&log, &enc_args.key_path, &enc_args.key_mode)?);
             },
         }
         mount(&uuid, &mount_path, key.as_ref())?;
 
-        // Remove failed/missing devices
-        let mut missing = false;
-        for (i, b) in superblock_devices.iter().enumerate() {
-            let Some(uuid) = &b.uuid else {
-                log.log(loga::WARN, format!("UUID missing for superblock device #{} ({:?})", i, b));
+        // Check current state
+        let mut missing = vec![];
+        let mut last_index = 0;
+        for d in read_dir(format!("/sys/fs/bcachefs/{}", uuid)).context("Error reading bcachefs sys dir")? {
+            let d = match d {
+                Ok(d) => d,
+                Err(e) => {
+                    log.log_err(loga::WARN, e.context("Error reading sysfs directory entry"));
+                    continue;
+                },
+            };
+            let name = match d.file_name().to_str().map(|x| x.to_string()) {
+                Some(n) => n,
+                None => {
+                    log.log_with(
+                        loga::WARN,
+                        "Error reading sysfs directory entry name as utf-8",
+                        ea!(name = String::from_utf8_lossy(d.file_name().as_bytes())),
+                    );
+                    continue;
+                },
+            };
+            let Some(index) = name.strip_prefix("dev-") else {
                 continue;
             };
-            let Some(bcachefs_id) = &b.bcachefs_id else {
-                log.log(loga::WARN, format!("Bcachefs ID missing for superblock device #{} ({:?})", i, b));
-                continue;
+            let index = match usize::from_str_radix(index, 10) {
+                Ok(i) => i,
+                Err(e) => {
+                    log.log_err(
+                        loga::WARN,
+                        e.context_with(
+                            "Error parsing device index from sysfs tree",
+                            ea!(name = String::from_utf8_lossy(d.file_name().as_bytes())),
+                        ),
+                    );
+                    continue;
+                },
             };
-            if !PathBuf::from(format!("/dev/disk/by-uuid-sub/{}", uuid)).exists() {
-                let mut c = Command::new("bcachefs");
-                c.arg("device").arg("remove").arg(bcachefs_id.to_string());
-                c.simple().run().context("Error removing failed/missing device")?;
-                missing = true;
+            last_index = last_index.max(index);
+            if !d.path().join("block").exists() {
+                missing.push(index);
             }
-        }
-        if missing {
-            Command::new("bcachefs").arg("data").arg("rereplicate").simple().run()?;
         }
 
         // Add fresh devices
         let blocks = lsblk()?;
         let unused = find_unused(blocks)?;
+        let added = !unused.is_empty();
         for b in unused {
             let hdd = b.rota.unwrap_or(true);
             let mut c = Command::new("bcachefs");
@@ -142,6 +122,18 @@ pub(crate) fn main(log: &Log, config: &Config, mount_path: &PathBuf) -> Result<(
                 false => "ssd",
             }, last_index)).arg(&mount_path).arg(b.path);
             c.simple().run().context("Error adding new device")?;
+        }
+
+        // Remove dead/missing devices
+        for index in missing {
+            let mut c = Command::new("bcachefs");
+            c.arg("device").arg("remove").arg(index.to_string());
+            c.simple().run().context("Error removing failed/missing device")?;
+        }
+
+        // Replicate data with few replicas after disks were lost
+        if added {
+            Command::new("bcachefs").arg("data").arg("rereplicate").simple().run()?;
         }
     } else {
         // New array
@@ -160,11 +152,11 @@ pub(crate) fn main(log: &Log, config: &Config, mount_path: &PathBuf) -> Result<(
                 crate::config::EncryptionMode::None {} => {
                     key = None;
                 },
-                crate::config::EncryptionMode::SharedImage(enc_args) => {
+                crate::config::EncryptionMode::DirectKey(enc_args) => {
                     key = Some(get_shared_image_key(&enc_args.key_mode, true)?);
                     c.arg("--encrypted");
                 },
-                crate::config::EncryptionMode::PrivateImage(enc_args) => {
+                crate::config::EncryptionMode::IndirectKey(enc_args) => {
                     key = Some(get_private_image_key(&log, &enc_args.key_path, &enc_args.key_mode)?);
                     c.arg("--encrypted");
                 },

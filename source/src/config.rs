@@ -10,6 +10,8 @@ pub const INNER_UUID: &'static str = "0afee777-4fca-45c6-9bed-64bf3091536b";
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum SharedImageKeyMode {
+    /// Read the key from stdin directly.
+    Stdin,
     /// The contents of a text (utf8) file are used as the password.
     File(PathBuf),
     /// `systemd-ask-password` will be used to query the password. The volume will be
@@ -19,7 +21,7 @@ pub enum SharedImageKeyMode {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct SharedImageArgs {
+pub struct DirectKeyArgs {
     /// How to unlock the volume
     pub key_mode: SharedImageKeyMode,
 }
@@ -55,7 +57,7 @@ pub enum PrivateImageKeyMode {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct PrivateImageArgs {
+pub struct IndirectKeyArgs {
     /// The location of the key to use to initialize/unlock the volume.
     ///
     /// The key file should be an encrypted utf-8 string. Start and end whitespace will
@@ -73,10 +75,12 @@ pub struct PrivateImageArgs {
 pub enum EncryptionMode {
     /// Disk is unencrypted.
     None,
-    /// A password is used directly to encrypt the disk
-    SharedImage(SharedImageArgs),
-    /// A password in an encrypted file stored in the image is used to encrypt the disk
-    PrivateImage(PrivateImageArgs),
+    /// A password is used directly to encrypt the disk.
+    DirectKey(DirectKeyArgs),
+    /// A password in an encrypted file stored in the image is used to encrypt the
+    /// disk. This allows alternate keys to be used to unlock the disk, such as
+    /// multiple administrators.
+    IndirectKey(IndirectKeyArgs),
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -91,7 +95,7 @@ pub enum FilesystemMode {
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct Config {
-    #[serde(skip, rename = "$schema")]
+    #[serde(rename = "$schema")]
     pub _schema: Option<String>,
     pub debug: Option<()>,
     /// Override the default UUID.

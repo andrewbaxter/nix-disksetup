@@ -320,11 +320,11 @@ pub(crate) fn main(log: &Log, config: &Config, mount_path: &PathBuf) -> Result<(
                 let fs_dev_path = format(&PathBuf::from(&candidate.path), &outer_uuid)?;
                 ensure_mounted(&fs_dev_path)?;
             },
-            EncryptionMode::SharedImage(enc_args) => {
+            EncryptionMode::DirectKey(enc_args) => {
                 let key = get_shared_image_key(&enc_args.key_mode, true)?;
                 setup_encrypted(&key)?;
             },
-            EncryptionMode::PrivateImage(enc_args) => {
+            EncryptionMode::IndirectKey(enc_args) => {
                 let key = get_private_image_key(&log, &enc_args.key_path, &enc_args.key_mode)?;
                 setup_encrypted(&key)?;
                 decrypt_extra(&key, &enc_args.decrypt)?;
@@ -357,11 +357,11 @@ pub(crate) fn main(log: &Log, config: &Config, mount_path: &PathBuf) -> Result<(
                 let fs_dev_path = PathBuf::from(&candidate.path);
                 ensure_mounted(&fs_dev_path)?;
             },
-            EncryptionMode::SharedImage(enc_args) => {
+            EncryptionMode::DirectKey(enc_args) => {
                 let key = get_shared_image_key(&enc_args.key_mode, false)?;
                 mount_encrypted(&key)?;
             },
-            EncryptionMode::PrivateImage(enc_args) => {
+            EncryptionMode::IndirectKey(enc_args) => {
                 let key = get_private_image_key(&log, &enc_args.key_path, &enc_args.key_mode)?;
                 mount_encrypted(&key)?;
                 decrypt_extra(&key, &enc_args.decrypt)?;

@@ -14,15 +14,17 @@ And three encryption modes:
 
 - No encryption - provision an unencrypted disk
 
-- Shared image encryption - credentials are directly encrypt/decrypt the drive, and the image itself contains no encrypted data
+- Direct key encryption - credentials are directly used to encrypt/decrypt the drive
 
-  Credentials can be provided programmatically (file/stdin) or interactively (systemd-ask-password)
+  Credentials can be provided programmatically (file/stdin) or interactively (systemd-ask-password).
 
-- Private image encryption - the image contains an encrypted key used to encrypt/decrypt the drive
+- Indirect key encryption - the administrator installs an encrypted (via gpg) key on the system, and volumesetup decrypts this to format/mount the volume.
 
-  At the moment, credentials must be provided interactively (via gpg smartcard, via NFC or USB).
+  A typical use case is if you have multiple users with GPG keys - you'd generate a volume key and encrypt it with each user's key as a recipient so that any one of them can unlock the volume.
 
-  Additional encrypted data can be included in the image which will be decrypted at unlock.
+  At the moment, credentials to unlock the volume must be provided interactively (via gpg smartcard, via NFC or USB).
+
+  Additional encrypted data can be included in the image which will be decrypted at unlock (see the section on additional decryption).
 
 ## Installation
 
@@ -31,18 +33,16 @@ And three encryption modes:
 You can start with this snippet:
 
 ```nix
-imports = [
-    ./volumesetup/source/module.nix
-];
-config = {
-    volumesetup = {
-        enable = true;
+{
+    imports = [
+        ./volumesetup/source/module.nix
+    ];
+    config = {
+        volumesetup = {
+            enable = true;
+        };
     };
-    # Required for bcachefs to identify fs member disks
-    services.udev.extraRules = ''
-        ENV{ID_FS_USAGE}=="filesystem|other|crypto", ENV{ID_FS_UUID_SUB_ENC}=="?*", SYMLINK+="disk/by-uuid-sub/$env{ID_FS_UUID_SUB_ENC}"
-    '';
-};
+}
 ```
 
 The above minimal config will format the largest unused disk as `ext4`, unencrypted.
@@ -56,22 +56,24 @@ let volumesetup = (import ./volumesetup/source/package.nix { pkgs = pkgs; }); in
 Here's another example with smartcard encryption:
 
 ```nix
-config = {
-    volumesetup = {
-        enable = true;
-        debug = true;
-        encryption = {
-            private_image = {
-                key_path = "${./smartcard_keyfile}";
-                key_mode = {
-                    smartcard = {
-                        pin = "factory_default";
+{
+    config = {
+        volumesetup = {
+            enable = true;
+            debug = true;
+            encryption = {
+                indirect_key = {
+                    key_path = "${./smartcard_keyfile}";
+                    key_mode = {
+                        smartcard = {
+                            pin = "factory_default";
+                        };
                     };
                 };
             };
         };
     };
-};
+}
 ```
 
 ### Other systems
@@ -99,22 +101,14 @@ Then add config like this:
     imports = [ ./path/to/volumesetup/source/module.nix ];
     config = {
         volumesetup.enable = true;
-        volumesetup.encryption.private_image = {
-            key_path =
-                let key = derivation {
-                    name = "volumesetup-key";
-                    system = builtins.currentSystem;
-                    builder = "${pkgs.bash}/bin/bash";
-                    args = [(pkgs.writeText "volumesetup-key-script" ''
-                        ${pkgs.sequoia-sq}/bin/sq encrypt \
-                            --recipient-file ${./person1.pubkey} \
-                            --recipient-file ${./person2.pubkey} \
-                            --output $out \
-                            ${./diskkey.plaintext} \
-                            ;
-                    '')];
-                }; in "${key}";
-            key_mode = "smartcard";
+        volumesetup.encryption.indirect_key =
+            import https://raw.githubusercontent.com/andrewbaxter/volumesetup/refs/heads/master/source/lib.nix {
+            pkgs = pkgs;
+            lib = lib;
+        }.encryptKeyfile {
+            name = "volumesetup_keyfile";
+            keyPath = ./diskkey.plaintext;
+            publicKeyPaths = [ ./person1.pubkey ./person2.pubkey ];
         };
     };
 }
@@ -145,7 +139,7 @@ On other systems or if doing this manually,
    ```json
    {
      "encryption": {
-       "private_image": {
+       "indirect_key": {
          "key_path": "/path/to/diskkey",
          "key_mode": {
            "smartcard": {
@@ -159,34 +153,27 @@ On other systems or if doing this manually,
 
 5. Place the file in the system image and run `volumesetup /path/to/config.json` at boot.
 
-### Private-image additional decryption
+### Indirect-key additional decryption
 
-When using private-image mode an additional file can be automatically decrypted by the key. This file could contain credentials or other non-dynamic private data. The file is PGP passphrase-encrypted (symmetric).
+When using indirect-key mode an additional file can be automatically decrypted by the key. This file could contain credentials or other non-dynamic private data. The file is PGP passphrase-encrypted (symmetric).
 
 #### Nix
 
-If you've already configured private-image mode, just add something like this:
+If you've already configured indirect-key mode, you can generate the data to decryption payload like this:
 
 ```nix
 {
     imports = [ ./path/to/volumesetup/source/module.nix ];
     config = {
-        volumesetup.encryption.private_image.decrypt =
-            let
-                decrypt = "my data...";
-                key = derivation {
-                    name = "volumesetup-decrypt-encrypt";
-                    system = builtins.currentSystem;
-                    builder = "${pkgs.bash}/bin/bash";
-                    args = [(pkgs.writeText "volumesetup-decrypt-encrypt-script" ''
-                        ${pkgs.sequoia-sq}/bin/sq encrypt \
-                            --password-file ${./diskkey.plaintext} \
-                            --output $out \
-                            ${decrypt} \
-                            ;
-                    '')];
-                };
-            in "${key}";
+        volumesetup.config.encryption.indirect_key.decrypt =
+        import https://raw.githubusercontent.com/andrewbaxter/volumesetup/refs/heads/master/source/lib.nix {
+            pkgs = pkgs;
+            lib = lib;
+        }.encryptData {
+            name = "volumesetup_decrypt";
+            keyPath = ./diskkey.plaintext;
+            plaintext = decrypt;
+        };
     };
 }
 ```
@@ -204,7 +191,7 @@ On other systems or if doing this manually,
    ```json
    {
      "encryption": {
-       "private_image": {
+       "indirect_key": {
          "decrypt": "path/to/decrypt.gpg"
        }
      }

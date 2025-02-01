@@ -1,4 +1,4 @@
-{ lib }: {
+{ pkgs, lib }: {
   # Creates an encrypted key file for private key volume. This encrypts a single decryption 
   # key with multiple user public keys so that any user can decrypt it to mount the volume.
   # As long as private key in `keyPath` remains the same user public keys can be freely added 
