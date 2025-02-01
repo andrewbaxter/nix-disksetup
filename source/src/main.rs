@@ -28,10 +28,14 @@ pub mod util;
 #[derive(Aargvark)]
 struct Args {
     config: AargvarkJson<Config>,
+    validate: Option<()>,
 }
 
 fn main1() -> Result<(), loga::Error> {
     let args = vark::<Args>();
+    if args.validate.is_some() {
+        return Ok(());
+    }
     let config = args.config.value;
     let log = Log::new_root(if config.debug.is_some() {
         loga::DEBUG
