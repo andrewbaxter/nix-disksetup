@@ -1,0 +1,240 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Config",
+  "type": "object",
+  "properties": {
+    "debug": {
+      "type": "null"
+    },
+    "encryption": {
+      "description": "How encryption should be handled.  Defaults to unencrypted.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/EncryptionMode"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "ensure_dirs": {
+      "description": "Ensure these directories (and parents) relative to the mountdir once it's mounted.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "fs": {
+      "description": "Filesystem to use, how to turn disks into filesystems.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/FilesystemMode"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "mountpoint": {
+      "description": "The mount point of the volume.  Defaults to `/mnt/persistent`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "uuid": {
+      "description": "Override the default UUID.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "EncryptionMode": {
+      "oneOf": [
+        {
+          "description": "Disk is unencrypted.",
+          "type": "string",
+          "enum": [
+            "none"
+          ]
+        },
+        {
+          "description": "A password is used directly to encrypt the disk",
+          "type": "object",
+          "required": [
+            "shared_image"
+          ],
+          "properties": {
+            "shared_image": {
+              "$ref": "#/definitions/SharedImageArgs"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "A password in an encrypted file stored in the image is used to encrypt the disk",
+          "type": "object",
+          "required": [
+            "private_image"
+          ],
+          "properties": {
+            "private_image": {
+              "$ref": "#/definitions/PrivateImageArgs"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "FilesystemMode": {
+      "oneOf": [
+        {
+          "description": "The largest unused disk will be used and formatted ext4.",
+          "type": "string",
+          "enum": [
+            "ext4"
+          ]
+        },
+        {
+          "description": "All unused disks will be added to the pool",
+          "type": "string",
+          "enum": [
+            "bcachefs"
+          ]
+        }
+      ]
+    },
+    "PinMode": {
+      "oneOf": [
+        {
+          "description": "Use the default PIN (`123456`)",
+          "type": "string",
+          "enum": [
+            "factory_default"
+          ]
+        },
+        {
+          "description": "Use a numeric PIN entry, with a scrambled keypad prompt. Press the numpad keys that correspond positionally to the numbers displayed in the prompt.\n\nThis accepts presses from the blocks (starting from the top left, left to right, top to bottom): `789456123` `uiojklm,.` or `wersdfxcv`.",
+          "type": "string",
+          "enum": [
+            "numpad"
+          ]
+        },
+        {
+          "description": "Request an alphanumeric PIN.",
+          "type": "string",
+          "enum": [
+            "text"
+          ]
+        }
+      ]
+    },
+    "PrivateImageArgs": {
+      "type": "object",
+      "required": [
+        "key_mode",
+        "key_path"
+      ],
+      "properties": {
+        "decrypt": {
+          "description": "Additional data to decrypt. The decrypted data will be written to `/run/volumesetup_decrypted`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "key_mode": {
+          "description": "How to unlock the key file",
+          "allOf": [
+            {
+              "$ref": "#/definitions/PrivateImageKeyMode"
+            }
+          ]
+        },
+        "key_path": {
+          "description": "The location of the key to use to initialize/unlock the volume.\n\nThe key file should be an encrypted utf-8 string. Start and end whitespace will be stripped.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "PrivateImageKeyMode": {
+      "oneOf": [
+        {
+          "description": "A GPG smartcard is used to decrypt a key file which is then used to initialize/unlock the volume. A prompt will be written to all system terminals. If your NFC reader has a light, the light will come on when it wants to unlock the key.",
+          "type": "object",
+          "required": [
+            "smartcard"
+          ],
+          "properties": {
+            "smartcard": {
+              "type": "object",
+              "required": [
+                "pin"
+              ],
+              "properties": {
+                "pin": {
+                  "description": "How to get the PIN.",
+                  "allOf": [
+                    {
+                      "$ref": "#/definitions/PinMode"
+                    }
+                  ]
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "SharedImageArgs": {
+      "type": "object",
+      "required": [
+        "key_mode"
+      ],
+      "properties": {
+        "key_mode": {
+          "description": "How to unlock the volume",
+          "allOf": [
+            {
+              "$ref": "#/definitions/SharedImageKeyMode"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "SharedImageKeyMode": {
+      "oneOf": [
+        {
+          "description": "The contents of a text (utf8) file are used as the password.",
+          "type": "object",
+          "required": [
+            "file"
+          ],
+          "properties": {
+            "file": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "`systemd-ask-password` will be used to query the password. The volume will be initialized/unlocked with the password.",
+          "type": "string",
+          "enum": [
+            "password"
+          ]
+        }
+      ]
+    }
+  }
+}

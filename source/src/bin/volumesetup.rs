@@ -4,7 +4,6 @@ use {
         vark,
         Aargvark,
     },
-    config::Config,
     loga::{
         ea,
         fatal,
@@ -16,14 +15,15 @@ use {
         fs::create_dir_all,
         path::PathBuf,
     },
+    volumesetup::config::{
+        self,
+        Config,
+    },
 };
 
-pub mod blockdev;
-pub mod fs_ext4;
-pub mod fs_bcachefs;
-pub mod config;
-pub mod key;
-pub mod util;
+mod volumesetuplib;
+
+use volumesetuplib::*;
 
 #[derive(Aargvark)]
 struct Args {
