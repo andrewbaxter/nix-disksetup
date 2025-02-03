@@ -95,7 +95,7 @@ pub enum FilesystemMode {
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct Config {
-    #[serde(rename = "$schema")]
+    #[serde(rename = "$schema", skip_serializing)]
     pub _schema: Option<String>,
     pub debug: Option<()>,
     /// Override the default UUID.
