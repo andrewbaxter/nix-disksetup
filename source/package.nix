@@ -36,6 +36,7 @@
           pkgs.e2fsprogs
           pkgs.cryptsetup
           pkgs.util-linux
+          pkgs.bcachefs-tools
         ];
       in
       ''

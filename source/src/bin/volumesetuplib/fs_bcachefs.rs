@@ -31,12 +31,13 @@ use {
 fn mount(uuid: &str, mount_path: &PathBuf, key: Option<&String>) -> Result<(), loga::Error> {
     let mut c = Command::new("bcachefs");
     c.arg("mount");
-    c.arg("--key-location=fail");
     c.arg("-o").arg("degraded,fsck,fix_errors");
     c.arg(format!("UUID={}", uuid)).arg(mount_path);
     if let Some(key) = key {
+        c.arg("--key_location=stdin");
         c.simple().run_stdin(key.as_bytes()).context("Error mounting bcachefs")?;
     } else {
+        c.arg("--key_location=fail");
         c.simple().run().context("Error mounting bcachefs")?;
     }
     return Ok(());
@@ -164,7 +165,15 @@ pub(crate) fn main(log: &Log, config: &Config, mount_path: &PathBuf) -> Result<(
             let mut label_id = 0;
             let mut has_hdd = false;
             let mut has_ssd = false;
-            for b in find_unused(lsblk()?)? {
+            let unused = find_unused(lsblk()?)?;
+            if unused.len() < 2 {
+                return Err(
+                    loga::err(
+                        "No existing volume found, and insufficient unused block devices to create new volume with replicas=2",
+                    ),
+                );
+            }
+            for b in unused {
                 if b.rota.unwrap_or(true) {
                     c.arg(format!("--label=hdd.d{}", label_id)).arg(b.path);
                     label_id += 1;
