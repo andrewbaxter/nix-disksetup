@@ -1,8 +1,8 @@
 use {
+    super::blockdev::LsblkDevice,
     crate::{
         blockdev::{
             find_unused,
-            lsblk,
         },
         config::{
             Config,
@@ -55,7 +55,12 @@ use {
     },
 };
 
-pub(crate) fn main(log: &Log, config: &Config, mount_path: &PathBuf) -> Result<(), loga::Error> {
+pub(crate) fn main(
+    log: &Log,
+    blocks: Vec<LsblkDevice>,
+    config: &Config,
+    mount_path: &PathBuf,
+) -> Result<(), loga::Error> {
     let outer_uuid = config.uuid.as_ref().map(|x| x.as_str()).unwrap_or(OUTER_UUID);
     let outer_uuid_dev_path = PathBuf::from(format!("/dev/disk/by-uuid/{}", &outer_uuid));
     let inner_uuid_dev_path = PathBuf::from(format!("/dev/disk/by-uuid/{}", &INNER_UUID));
@@ -245,7 +250,6 @@ pub(crate) fn main(log: &Log, config: &Config, mount_path: &PathBuf) -> Result<(
         }
         return Ok(());
     };
-    let blocks = lsblk()?;
 
     // Ensure mount
     superif!({
@@ -253,20 +257,24 @@ pub(crate) fn main(log: &Log, config: &Config, mount_path: &PathBuf) -> Result<(
         for candidate in &blocks {
             let uuid = candidate.uuid.as_ref().map(|u| u.as_str());
             if uuid == Some(&outer_uuid) {
-                log.log_with(loga::INFO, "Found persistent disk", ea!(disk = candidate.path));
+                log.log_with(loga::INFO, "Found persistent disk", ea!(disk = candidate.path.dbg_str()));
                 break 'exists_outer candidate;
             }
             log.log_with(
                 loga::DEBUG,
                 "UUID mismatch",
-                ea!(disk = candidate.path, found = candidate.uuid.dbg_str(), want = outer_uuid),
+                ea!(disk = candidate.path.dbg_str(), found = candidate.uuid.dbg_str(), want = outer_uuid),
             );
         }
 
         // Find existing volume, or candidate disk to format
         let unused = find_unused(blocks)?;
         for candidate in &unused {
-            log.log_with(loga::INFO, "Found unused disk", ea!(disk = candidate.path, size = candidate.size));
+            log.log_with(
+                loga::INFO,
+                "Found unused disk",
+                ea!(disk = candidate.path.dbg_str(), size = candidate.size),
+            );
         }
         let best_candidate = unused.into_iter().next();
 
@@ -275,7 +283,7 @@ pub(crate) fn main(log: &Log, config: &Config, mount_path: &PathBuf) -> Result<(
         log.log_with(
             loga::INFO,
             "Couldn't find persistent disk, formatting best attached candidate disk",
-            ea!(disk = candidate.path),
+            ea!(disk = candidate.path.dbg_str()),
         );
         let setup_encrypted = |key: &str| -> Result<(), loga::Error> {
             log.log_with(loga::INFO, "Initializing LUKS device", ea!(dev = candidate.path.dbg_str()));

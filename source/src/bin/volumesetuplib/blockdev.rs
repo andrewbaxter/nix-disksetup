@@ -5,6 +5,7 @@ use {
     std::{
         cmp::Reverse,
         collections::HashSet,
+        path::PathBuf,
         process::Command,
     },
 };
@@ -18,18 +19,19 @@ pub(crate) struct LsblkRoot {
 #[derive(Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) struct LsblkDevice {
-    /// path to the device node
-    pub(crate) path: String,
-    /// size of the device in bytes.
+    /// Path to the device node
+    pub(crate) path: PathBuf,
+    /// Size of the device in bytes.
     pub(crate) size: i64,
-    /// de-duplicated chain of subsystems
+    /// De-duplicated chain of subsystems
     pub(crate) subsystems: String,
-    /// all locations where device is mounted
+    /// All locations where device is mounted. I think `None` means mounted in a parent
+    /// namespace (invisible) or something like that.
     pub(crate) mountpoints: Vec<Option<String>>,
-    /// device type
+    /// Device type
     #[serde(rename = "type")]
     pub(crate) type_: String,
-    /// filesystem UUID. Not always a standard uuid, can be 8 characters.
+    /// Filesystem UUID. Not always a standard uuid, can be 8 characters.
     pub(crate) uuid: Option<String>,
     #[serde(default)]
     pub(crate) children: Vec<LsblkDevice>,

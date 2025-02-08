@@ -4,6 +4,7 @@ use {
         vark,
         Aargvark,
     },
+    blockdev::lsblk,
     loga::{
         ea,
         fatal,
@@ -51,9 +52,21 @@ fn main1() -> Result<(), loga::Error> {
             .absolutize()
             .context("Couldn't make mountpoint absolute")?
             .into_owned();
+    let blocks = lsblk()?;
+    for block in &blocks {
+        for mount in &block.mountpoints {
+            let Some(mp) = mount else {
+                continue;
+            };
+            if mp.as_str() == mount_path.to_string_lossy().as_ref() {
+                log.log(loga::INFO, "Already mounted, doing nothing.");
+                return Ok(());
+            }
+        }
+    }
     match config.fs.as_ref().unwrap_or(&config::FilesystemMode::Bcachefs {}) {
-        config::FilesystemMode::Ext4 {} => fs_ext4::main(&log, &config, &mount_path)?,
-        config::FilesystemMode::Bcachefs {} => fs_bcachefs::main(&log, &config, &mount_path)?,
+        config::FilesystemMode::Ext4 {} => fs_ext4::main(&log, blocks, &config, &mount_path)?,
+        config::FilesystemMode::Bcachefs {} => fs_bcachefs::main(&log, blocks, &config, &mount_path)?,
     }
 
     // Ensure subdirectories in mountpoint

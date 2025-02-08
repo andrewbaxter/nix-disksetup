@@ -1,9 +1,7 @@
 use {
+    super::blockdev::LsblkDevice,
     crate::{
-        blockdev::{
-            find_unused,
-            lsblk,
-        },
+        blockdev::find_unused,
         config::{
             Config,
             OUTER_UUID,
@@ -16,12 +14,17 @@ use {
     },
     loga::{
         ea,
+        DebugDisplay,
         ErrContext,
         Log,
         ResultContext,
     },
     std::{
-        fs::read_dir,
+        collections::HashSet,
+        fs::{
+            read_dir,
+            read_link,
+        },
         os::unix::ffi::OsStrExt,
         path::PathBuf,
         process::Command,
@@ -45,7 +48,34 @@ fn mount(log: &Log, uuid: &str, mount_path: &PathBuf, key: Option<&String>) -> R
     return Ok(());
 }
 
-pub(crate) fn main(log: &Log, config: &Config, mount_path: &PathBuf) -> Result<(), loga::Error> {
+pub(crate) fn main(
+    log: &Log,
+    blocks: Vec<LsblkDevice>,
+    config: &Config,
+    mount_path: &PathBuf,
+) -> Result<(), loga::Error> {
+    match main1(log, blocks, config, mount_path) {
+        Ok(_) => {
+            return Ok(());
+        },
+        Err(e) => {
+            let mut c = Command::new("umount");
+            c.arg("--lazy");
+            c.arg(mount_path);
+            if let Err(e) = c.simple().run() {
+                eprintln!("Warning: failed to unmount [{}] as cleanup after error: {}", mount_path.dbg_str(), e);
+            }
+            return Err(e);
+        },
+    }
+}
+
+pub(crate) fn main1(
+    log: &Log,
+    blocks: Vec<LsblkDevice>,
+    config: &Config,
+    mount_path: &PathBuf,
+) -> Result<(), loga::Error> {
     let uuid = config.uuid.as_ref().map(|x| x.as_str()).unwrap_or(OUTER_UUID);
     let mut c = Command::new("bcachefs");
     c.arg("show-super").arg(format!("/dev/disk/by-uuid/{}", uuid));
@@ -53,7 +83,7 @@ pub(crate) fn main(log: &Log, config: &Config, mount_path: &PathBuf) -> Result<(
     if let Ok(_) = c.simple().run_stdout() {
         log.log(loga::INFO, format!("Filesystem found with UUID {}, mounting", uuid));
 
-        // Mount - can't add/remove until that's done
+        // # Mount - can't add/remove until that's done
         let key;
         match config.encryption.as_ref().unwrap_or(&crate::config::EncryptionMode::None {}) {
             crate::config::EncryptionMode::None {} => {
@@ -68,8 +98,12 @@ pub(crate) fn main(log: &Log, config: &Config, mount_path: &PathBuf) -> Result<(
         }
         mount(log, &uuid, &mount_path, key.as_ref())?;
 
-        // Check current state
+        // # Check current state
         let mut missing = vec![];
+        let mut used_extra = 
+            // Unused detection uses lsblk mountpoints, but bcachefs devices don't have
+            // mountpoints in lsblk - so exclude those separately
+            HashSet::new();
         let mut last_index = 0;
         for d in read_dir(format!("/sys/fs/bcachefs/{}", uuid)).context("Error reading bcachefs sys dir")? {
             let d = match d {
@@ -107,17 +141,27 @@ pub(crate) fn main(log: &Log, config: &Config, mount_path: &PathBuf) -> Result<(
                 },
             };
             last_index = last_index.max(index);
-            if !d.path().join("block").exists() {
+            if d.path().join("block").exists() {
+                used_extra.insert(
+                    read_link(d.path().join("block"))
+                        .context_with("Error reading bcachefs dev link", ea!(path = d.path().dbg_str()))?
+                        .file_name()
+                        .expect("Bcachefs dev link doesn't link to file")
+                        .to_os_string(),
+                );
+            } else {
                 missing.push(index);
             }
         }
 
-        // Add fresh devices
-        let blocks = lsblk()?;
+        // # Add fresh devices
         let unused = find_unused(blocks)?;
         let added = !unused.is_empty();
         for b in unused {
-            log.log(loga::INFO, format!("Adding new device [{}] to pool", b.path));
+            if used_extra.contains(b.path.file_name().unwrap()) {
+                continue;
+            }
+            log.log(loga::INFO, format!("Adding new device [{}] to pool", b.path.dbg_str()));
             let hdd = b.rota.unwrap_or(true);
             let mut c = Command::new("bcachefs");
             last_index += 1;
@@ -129,27 +173,27 @@ pub(crate) fn main(log: &Log, config: &Config, mount_path: &PathBuf) -> Result<(
             c.simple().run().context("Error adding new device")?;
         }
 
-        // Remove dead/missing devices
+        // # Remove dead/missing devices
         for index in missing {
             log.log(loga::INFO, format!("Removing lost device [{}] from pool", index));
             let mut c = Command::new("bcachefs");
-            c.arg("device").arg("remove").arg(index.to_string());
+            c.arg("device").arg("remove").arg(index.to_string()).arg(mount_path);
             log.log(loga::DEBUG, format!("Running {:?}", c));
             c.simple().run().context("Error removing failed/missing device")?;
         }
 
-        // Replicate data with few replicas after disks were lost
+        // # Replicate data with few replicas after disks were lost
         if added {
             log.log(loga::INFO, format!("Triggering rereplicate"));
             let mut c = Command::new("bcachefs");
             log.log(loga::DEBUG, format!("Running {:?}", c));
-            c.arg("data").arg("rereplicate");
+            c.arg("data").arg("rereplicate").arg(mount_path);
             c.simple().run()?;
         }
     } else {
         log.log(loga::INFO, format!("No filesystem found with UUID {} (show-super failed), creating", uuid));
 
-        // New array
+        // # New array
         let key;
         {
             let mut c = Command::new("bcachefs");
@@ -177,7 +221,7 @@ pub(crate) fn main(log: &Log, config: &Config, mount_path: &PathBuf) -> Result<(
             let mut label_id = 0;
             let mut has_hdd = false;
             let mut has_ssd = false;
-            let unused = find_unused(lsblk()?)?;
+            let unused = find_unused(blocks)?;
             if unused.len() < 2 {
                 return Err(
                     loga::err(
@@ -186,7 +230,7 @@ pub(crate) fn main(log: &Log, config: &Config, mount_path: &PathBuf) -> Result<(
                 );
             }
             for b in unused {
-                log.log(loga::INFO, format!("With volume [{}]", b.path));
+                log.log(loga::INFO, format!("With volume [{}]", b.path.dbg_str()));
                 if b.rota.unwrap_or(true) {
                     c.arg(format!("--label=hdd.d{}", label_id)).arg(b.path);
                     label_id += 1;
