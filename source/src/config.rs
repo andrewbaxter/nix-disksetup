@@ -97,7 +97,6 @@ pub enum FilesystemMode {
 pub struct Config {
     #[serde(rename = "$schema", skip_serializing)]
     pub _schema: Option<String>,
-    pub debug: Option<()>,
     /// Override the default UUID.
     pub uuid: Option<String>,
     /// How encryption should be handled.  Defaults to unencrypted.

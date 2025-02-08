@@ -4,13 +4,11 @@
   "type": "object",
   "properties": {
     "$schema": {
+      "writeOnly": true,
       "type": [
         "string",
         "null"
       ]
-    },
-    "debug": {
-      "type": "null"
     },
     "encryption": {
       "description": "How encryption should be handled.  Defaults to unencrypted.",

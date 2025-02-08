@@ -28,16 +28,18 @@ use {
     },
 };
 
-fn mount(uuid: &str, mount_path: &PathBuf, key: Option<&String>) -> Result<(), loga::Error> {
+fn mount(log: &Log, uuid: &str, mount_path: &PathBuf, key: Option<&String>) -> Result<(), loga::Error> {
     let mut c = Command::new("bcachefs");
     c.arg("mount");
     c.arg("-o").arg("degraded,fsck,fix_errors");
     c.arg(format!("UUID={}", uuid)).arg(mount_path);
     if let Some(key) = key {
         c.arg("--key_location=stdin");
+        log.log(loga::DEBUG, format!("Running {:?}", c));
         c.simple().run_stdin(key.as_bytes()).context("Error mounting bcachefs")?;
     } else {
         c.arg("--key_location=fail");
+        log.log(loga::DEBUG, format!("Running {:?}", c));
         c.simple().run().context("Error mounting bcachefs")?;
     }
     return Ok(());
@@ -45,12 +47,12 @@ fn mount(uuid: &str, mount_path: &PathBuf, key: Option<&String>) -> Result<(), l
 
 pub(crate) fn main(log: &Log, config: &Config, mount_path: &PathBuf) -> Result<(), loga::Error> {
     let uuid = config.uuid.as_ref().map(|x| x.as_str()).unwrap_or(OUTER_UUID);
-    if let Ok(_) =
-        Command::new("bcachefs")
-            .arg("show-super")
-            .arg(format!("/dev/disk/by-uuid/{}", uuid))
-            .simple()
-            .run_stdout() {
+    let mut c = Command::new("bcachefs");
+    c.arg("show-super").arg(format!("/dev/disk/by-uuid/{}", uuid));
+    log.log(loga::DEBUG, format!("Running {:?}", c));
+    if let Ok(_) = c.simple().run_stdout() {
+        log.log(loga::INFO, format!("Filesystem found with UUID {}, mounting", uuid));
+
         // Mount - can't add/remove until that's done
         let key;
         match config.encryption.as_ref().unwrap_or(&crate::config::EncryptionMode::None {}) {
@@ -64,7 +66,7 @@ pub(crate) fn main(log: &Log, config: &Config, mount_path: &PathBuf) -> Result<(
                 key = Some(get_private_image_key(&log, &enc_args.key_path, &enc_args.key_mode)?);
             },
         }
-        mount(&uuid, &mount_path, key.as_ref())?;
+        mount(log, &uuid, &mount_path, key.as_ref())?;
 
         // Check current state
         let mut missing = vec![];
@@ -115,6 +117,7 @@ pub(crate) fn main(log: &Log, config: &Config, mount_path: &PathBuf) -> Result<(
         let unused = find_unused(blocks)?;
         let added = !unused.is_empty();
         for b in unused {
+            log.log(loga::INFO, format!("Adding new device [{}] to pool", b.path));
             let hdd = b.rota.unwrap_or(true);
             let mut c = Command::new("bcachefs");
             last_index += 1;
@@ -122,21 +125,30 @@ pub(crate) fn main(log: &Log, config: &Config, mount_path: &PathBuf) -> Result<(
                 true => "hdd",
                 false => "ssd",
             }, last_index)).arg(&mount_path).arg(b.path);
+            log.log(loga::DEBUG, format!("Running {:?}", c));
             c.simple().run().context("Error adding new device")?;
         }
 
         // Remove dead/missing devices
         for index in missing {
+            log.log(loga::INFO, format!("Removing lost device [{}] from pool", index));
             let mut c = Command::new("bcachefs");
             c.arg("device").arg("remove").arg(index.to_string());
+            log.log(loga::DEBUG, format!("Running {:?}", c));
             c.simple().run().context("Error removing failed/missing device")?;
         }
 
         // Replicate data with few replicas after disks were lost
         if added {
-            Command::new("bcachefs").arg("data").arg("rereplicate").simple().run()?;
+            log.log(loga::INFO, format!("Triggering rereplicate"));
+            let mut c = Command::new("bcachefs");
+            log.log(loga::DEBUG, format!("Running {:?}", c));
+            c.arg("data").arg("rereplicate");
+            c.simple().run()?;
         }
     } else {
+        log.log(loga::INFO, format!("No filesystem found with UUID {} (show-super failed), creating", uuid));
+
         // New array
         let key;
         {
@@ -174,6 +186,7 @@ pub(crate) fn main(log: &Log, config: &Config, mount_path: &PathBuf) -> Result<(
                 );
             }
             for b in unused {
+                log.log(loga::INFO, format!("With volume [{}]", b.path));
                 if b.rota.unwrap_or(true) {
                     c.arg(format!("--label=hdd.d{}", label_id)).arg(b.path);
                     label_id += 1;
@@ -190,13 +203,15 @@ pub(crate) fn main(log: &Log, config: &Config, mount_path: &PathBuf) -> Result<(
             if has_hdd {
                 c.arg("--background_target=hdd");
             }
+            log.log(loga::DEBUG, format!("Running {:?}", c));
             if let Some(key) = &key {
                 c.simple().run_stdin(key.as_bytes()).context("Error formatting bcachefs")?;
             } else {
                 c.simple().run().context("Error formatting bcachefs")?;
             }
         }
-        mount(&uuid, &mount_path, key.as_ref())?;
+        log.log(loga::INFO, format!("Mounting filesystem"));
+        mount(log, &uuid, &mount_path, key.as_ref())?;
     }
     return Ok(());
 }

@@ -29,6 +29,7 @@ use volumesetuplib::*;
 struct Args {
     config: AargvarkJson<Config>,
     validate: Option<()>,
+    debug: Option<()>,
 }
 
 fn main1() -> Result<(), loga::Error> {
@@ -36,12 +37,12 @@ fn main1() -> Result<(), loga::Error> {
     if args.validate.is_some() {
         return Ok(());
     }
-    let config = args.config.value;
-    let log = Log::new_root(if config.debug.is_some() {
+    let log = Log::new_root(if args.debug.is_some() {
         loga::DEBUG
     } else {
         loga::INFO
     });
+    let config = args.config.value;
     let mount_path =
         config
             .mountpoint
