@@ -156,7 +156,7 @@ pub(crate) fn main1(
 
         // # Add fresh devices
         let unused = find_unused(blocks)?;
-        let added = !unused.is_empty();
+        let mut added = false;
         for b in unused {
             if used_extra.contains(b.path.file_name().unwrap()) {
                 continue;
@@ -171,6 +171,7 @@ pub(crate) fn main1(
             }, last_index)).arg(&mount_path).arg(b.path);
             log.log(loga::DEBUG, format!("Running {:?}", c));
             c.simple().run().context("Error adding new device")?;
+            added = true;
         }
 
         // # Remove dead/missing devices
